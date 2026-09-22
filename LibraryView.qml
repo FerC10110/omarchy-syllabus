@@ -54,6 +54,13 @@ Item {
       }
 
       Button {
+        iconText: Model.icon("web")
+        text: "Add from the web"
+        tooltipText: "A YouTube playlist, a Vimeo showcase or a single video"
+        onClicked: root.app.openWebAdd()
+      }
+
+      Button {
         iconText: Model.icon("refresh")
         iconSpinning: root.app.scanning
         text: root.app.scanning ? "Scanning…" : "Rescan"

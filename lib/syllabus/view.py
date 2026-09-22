@@ -2,7 +2,7 @@
 Reading only: building a view never touches the disk beyond a few stat calls."""
 import os
 
-from . import covers, paths, progress, scan, store
+from . import covers, downloads, paths, progress, scan, store
 
 SUSPECT_SECONDS = 60
 
@@ -61,7 +61,7 @@ def _ordered(lessons, order):
     return known + [l for l in lessons if l["id"] not in position]
 
 
-def _lesson(rec, over, entry, files):
+def _lesson(rec, over, entry, files, saved_downloads=None):
     record = files.get(rec["id"]) or {}
     duration = float(record.get("duration") or entry.get("duration") or 0)
     error = record.get("error") or ""
@@ -71,10 +71,13 @@ def _lesson(rec, over, entry, files):
     if duration > 0:
         pos = min(pos, duration)
     title = over.get("title") if isinstance(over.get("title"), str) and over.get("title") else rec["title"]
+    saved = (saved_downloads or {}).get(rec["id"]) or {}
     return {"id": rec["id"], "title": title, "defaultTitle": rec["title"], "name": rec["name"],
             "group": rec.get("group", ""), "number": rec.get("number"), "duration": duration, "pos": pos,
             "seen": bool(entry.get("seen")), "hidden": hidden, "suspect": suspect, "error": error,
-            "updatedAt": entry.get("updatedAt") or "", "bookmarks": valid_marks(over.get("bookmarks"))}
+            "updatedAt": entry.get("updatedAt") or "", "bookmarks": valid_marks(over.get("bookmarks")),
+            "url": rec.get("url", ""), "source": rec.get("source", ""),
+            "available": rec.get("available", True), "downloaded": bool(saved.get("path"))}
 
 
 def _duration_stats(total, watched):
@@ -85,7 +88,7 @@ def _duration_stats(total, watched):
 
 
 def _totals(lessons):
-    visible = [l for l in lessons if not l["hidden"]]
+    visible = [l for l in lessons if not l["hidden"] and l["available"]]
     total = sum(l["duration"] for l in visible)
     watched = sum(l["duration"] if l["seen"] else min(l["pos"], l["duration"]) for l in visible)
     stats = {"lessonCount": len(visible), "seenCount": sum(1 for l in visible if l["seen"])}
@@ -97,6 +100,9 @@ def _cover(tree_course, over, root_path):
     chosen = over.get("cover")
     if isinstance(chosen, str) and chosen and os.path.isfile(chosen):
         return chosen
+    cached = tree_course.get("coverPath") or ""
+    if cached and os.path.isfile(cached):
+        return cached
     auto = tree_course.get("autoCover")
     if auto and root_path:
         cached = covers.cached_path(os.path.join(root_path, auto))
@@ -105,10 +111,11 @@ def _cover(tree_course, over, root_path):
     return ""
 
 
-def _course(tree_course, library, state, files, online, root_path):
+def _course(tree_course, library, state, files, online, root_path, saved_downloads=None):
     course_id = tree_course["id"]
     over = library["courses"].get(course_id) or {}
-    lessons = [_lesson(rec, library["lessons"].get(rec["id"]) or {}, state["lessons"].get(rec["id"]) or {}, files)
+    lessons = [_lesson(rec, library["lessons"].get(rec["id"]) or {}, state["lessons"].get(rec["id"]) or {}, files,
+                       saved_downloads)
                for rec in tree_course.get("lessons", [])]
     lessons = _ordered(lessons, over.get("order"))
     tasks = _valid_tasks(over.get("tasks"))
@@ -124,9 +131,35 @@ def _course(tree_course, library, state, files, online, root_path):
         "docCount": len(tree_course.get("docs", [])),
         "lastPlayedAt": max((l["updatedAt"] for l in lessons), default=""),
         "hasNote": os.path.exists(paths.note_path(course_id)),
+        "web": None,
     }
     course.update(_totals(lessons))
     return course
+
+
+def _size(value):
+    """A download's byte count, or 0 for a junk value from a hand-edited state.json."""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _web_block(tree_course, lessons, info, definition, saved_downloads):
+    """What the panel shows about a web course: where it came from, when it was read last,
+    how much of it is already on disk, and whether a download is running right now."""
+    saved = [saved_downloads.get(l["id"]) or {} for l in lessons]
+    saved = [s for s in saved if s.get("path")]
+    running = downloads.progress(tree_course["id"]) or {}
+    return {"kind": tree_course.get("sourceKind", ""), "url": tree_course.get("sourceUrl", ""),
+            "fetchedAt": info.get("fetchedAt", ""), "error": info.get("error", ""),
+            "videoCount": len(lessons), "goneCount": sum(1 for l in lessons if not l["available"]),
+            "downloadedCount": len(saved), "downloadedBytes": sum(_size(s.get("size")) for s in saved),
+            "pendingCount": sum(1 for l in lessons if l["available"] and not l["downloaded"]),
+            "sources": [{"kind": s.get("kind", ""), "url": str(s.get("url") or "")}
+                        for s in (definition.get("sources") or []) if isinstance(s, dict)],
+            "downloading": bool(running), "downloadDone": int(running.get("done") or 0),
+            "downloadTotal": int(running.get("total") or 0)}
 
 
 def _stats(course_ids, by_id):
@@ -161,7 +194,7 @@ def resume_target(courses, roadmaps, state):
     """What "Continue" plays: the last video, or the next unseen one of its course; when
     that course is done, the next unfinished course of the roadmaps (the roadmap
     holding the last course first)."""
-    order = {c["id"]: [l["id"] for l in c["lessons"] if not l["hidden"]] for c in courses}
+    order = {c["id"]: [l["id"] for l in c["lessons"] if not l["hidden"] and l["available"]] for c in courses}
     target = progress.resume_lesson(order, state)
     if target in order.get(_owner_of(order, target), []):
         return target
@@ -193,6 +226,7 @@ def _continue(target, courses):
 
 def build_view(config, library, state, cache, moment=None):
     files = cache.get("files") or {}
+    saved_downloads = state.get("downloads") or {}
     roots, courses, folders = [], [], {}
     for root in config["roots"]:
         tree = (cache.get("roots") or {}).get(root["id"]) or {}
@@ -204,7 +238,18 @@ def build_view(config, library, state, cache, moment=None):
             folders[folder_id] = {"layout": override if override in ("course", "collection") else "auto",
                                   "detected": detected}
         for tree_course in tree.get("courses", []):
-            courses.append(_course(tree_course, library, state, files, online, root["path"]))
+            courses.append(_course(tree_course, library, state, files, online, root["path"], saved_downloads))
+    web_tree = (cache.get("roots") or {}).get("web") or {}
+    web_courses = web_tree.get("courses") or []
+    if web_courses or web_tree.get("error"):
+        roots.append({"id": "web", "path": "", "online": True, "error": web_tree.get("error", ""),
+                      "scannedAt": web_tree.get("fetchedAt", ""), "courseCount": len(web_courses)})
+    for tree_course in web_courses:
+        course = _course(tree_course, library, state, files, True, "", saved_downloads)
+        course["web"] = _web_block(tree_course, course["lessons"],
+                                   (web_tree.get("sources") or {}).get(tree_course["id"]) or {},
+                                   library["web"].get(tree_course["id"]) or {}, saved_downloads)
+        courses.append(course)
     courses.sort(key=lambda c: (c["topic"] == "", scan.natural_key(c["topic"]), scan.natural_key(c["title"])))
     by_id = {c["id"]: c for c in courses}
     roadmaps = [_roadmap(r, by_id) for r in library["roadmaps"]]

@@ -98,6 +98,28 @@ class Companion(TempHome):
         self.assertIn("--keep-last", by_path[f"--path={first}"])      # end-file "stop": it was replaced
         self.assertNotIn("--keep-last", by_path[f"--path={second}"])  # end-file "quit": still the last one
 
+    def test_a_video_that_cannot_be_opened_notifies(self):
+        fake_notify = os.path.join(self.tmp, "notify-send")
+        with open(fake_notify, "w", encoding="utf-8") as f:
+            f.write('#!/usr/bin/env python3\n'
+                    'import json, os, sys\n'
+                    'open(os.environ["FAKE_NOTIFY_LOG"], "a").write(json.dumps(sys.argv[1:]) + "\\n")\n')
+        os.chmod(fake_notify, os.stat(fake_notify).st_mode | stat.S_IXUSR)
+        log = os.path.join(self.tmp, "notify.log")
+        env = dict(os.environ, PATH=self.tmp + os.pathsep + os.environ["PATH"], FAKE_NOTIFY_LOG=log)
+        missing = os.path.join(self.tmp, "no-existe.mkv")
+        subprocess.run(["mpv", "--no-config", "--vo=null", "--ao=null", "--script=" + LUA,
+                        "--script-opt=syllabus-bin=/bin/true", missing],
+                       env=env, capture_output=True, timeout=30)
+        for _ in range(20):
+            if os.path.exists(log):
+                break
+            time.sleep(0.1)
+        with open(log, encoding="utf-8") as f:
+            call = json.loads(f.readline())
+        self.assertIn("Syllabus", call)
+        self.assertTrue(any("Couldn't play" in part for part in call))
+
 
 if __name__ == "__main__":
     unittest.main()

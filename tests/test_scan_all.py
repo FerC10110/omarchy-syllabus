@@ -1,8 +1,8 @@
 import os
 import unittest
 
-from support import TempHome, install_fake_ffprobe, make_tree
-from syllabus import covers, paths, probe, scan, store
+from support import TempHome, install_fake_ffprobe, install_fake_ytdlp, make_tree, ytdlp_answer, ytdlp_calls
+from syllabus import covers, paths, probe, scan, store, web
 
 
 def config_for(root):
@@ -146,6 +146,95 @@ class Covers(TempHome):
         with self.assertRaises(OSError):
             covers.cache_cover(source)
         self.assertEqual(os.listdir(paths.covers_dir()), [])
+
+
+class WebRoot(TempHome):
+    def setUp(self):
+        super().setUp()
+        install_fake_ffprobe(self.tmp)
+        self.answers = install_fake_ytdlp(self.tmp)
+        self.root = os.path.join(self.tmp, "cursos")
+        make_tree(self.root, {"A/1_a.mp4": 600})
+        store.write_json(paths.config_path(), {"roots": [{"id": "main", "path": self.root}],
+                                               "web": {"downloadFolder": os.path.join(self.root, "Bajados")}})
+        self.config = store.load_config()
+
+    def fake_tree(self, courses=("web:7f3a21",)):
+        def build(defs, old_tree, due, **rest):
+            self.built = (dict(defs), set(due))
+            return {"courses": [{"id": cid, "rootId": "web", "relpath": "", "folderId": "", "title": "Curso web",
+                                 "topic": "", "docs": [], "images": [], "autoCover": "", "coverPath": "",
+                                 "sourceUrl": "https://example/p", "sourceKind": "playlist",
+                                 "lessons": [{"id": cid + "/youtube:aaa", "title": "1", "name": "1", "number": None,
+                                              "group": "", "relpath": "", "url": "https://www.youtube.com/watch?v=aaa",
+                                              "site": "youtube", "videoId": "aaa", "available": True,
+                                              "source": "playlist", "duration": 300.0}]} for cid in courses],
+                    "images": [], "folders": {}, "sources": {cid: {"fetchedAt": store.now_iso(), "error": ""}
+                                                             for cid in courses},
+                    "fetchedAt": store.now_iso(), "error": ""}
+        return build
+
+    def scan(self, defs, old=None, force=False, web_ids=None):
+        return scan.scan_all(self.config, {}, old or store.empty_scan(), probe.probe_duration, force,
+                             web_defs=defs, web_ids=web_ids, build_web=self.fake_tree())
+
+    def test_the_web_root_joins_the_disk_roots_and_its_durations_go_to_files(self):
+        cache = self.scan({"web:7f3a21": {"sources": [], "addedAt": ""}})
+        self.assertEqual(sorted(cache["roots"]), ["main", "web"])
+        self.assertEqual(cache["files"]["web:7f3a21/youtube:aaa"], {"duration": 300.0})
+        self.assertEqual(self.built[1], {"web:7f3a21"})
+
+    def test_without_web_courses_nothing_web_is_scanned(self):
+        cache = self.scan({})
+        self.assertEqual(list(cache["roots"]), ["main"])
+        self.assertEqual(ytdlp_calls(self.answers), [])
+
+    def test_the_download_folder_is_not_scanned_as_a_course(self):
+        make_tree(self.root, {"Bajados/Curso web/01 - uno [youtube-aaa].mkv": 300})
+        cache = self.scan({})
+        titles = [c["title"] for c in cache["roots"]["main"]["courses"]]
+        self.assertNotIn("Bajados", titles)
+        self.assertEqual(titles, ["A"])
+
+    def test_a_download_folder_nested_under_a_course_root_is_not_scanned_either(self):
+        make_tree(self.root, {"Mercados/cursoTrading/1_uno.mp4": 300,
+                              "Mercados/Bajados/Curso web/01 - uno [youtube-aaa].mkv": 300})
+        store.write_json(paths.config_path(),
+                         {"roots": [{"id": "main", "path": self.root}],
+                          "web": {"downloadFolder": os.path.join(self.root, "Mercados", "Bajados")}})
+        self.config = store.load_config()
+        cache = self.scan({})
+        courses = cache["roots"]["main"]["courses"]
+        self.assertNotIn("Bajados", [c["title"] for c in courses])
+        paths_seen = [l["relpath"] for c in courses for l in c["lessons"]]
+        self.assertTrue(all("Bajados" not in p for p in paths_seen), paths_seen)
+
+    def test_only_the_courses_that_are_due_are_read_again(self):
+        old = self.scan({"web:7f3a21": {"sources": [], "addedAt": ""}})
+        fresh = dict(old["roots"]["web"]["sources"]["web:7f3a21"], fetchedAt=store.now_iso())
+        old["roots"]["web"]["sources"]["web:7f3a21"] = fresh
+        self.scan({"web:7f3a21": {"sources": [], "addedAt": ""}}, old=old)
+        self.assertEqual(self.built[1], set())
+        self.scan({"web:7f3a21": {"sources": [], "addedAt": ""}}, old=old, web_ids={"web:7f3a21"})
+        self.assertEqual(self.built[1], {"web:7f3a21"})
+        self.scan({"web:7f3a21": {"sources": [], "addedAt": ""}}, old=old, force=True)
+        self.assertEqual(self.built[1], {"web:7f3a21"})
+
+    def test_a_broken_web_step_does_not_lose_the_disk_scan(self):
+        def explode(defs, old_tree, due, **rest):
+            raise RuntimeError("yt-dlp exploded")
+
+        cache = scan.scan_all(self.config, {}, store.empty_scan(), probe.probe_duration,
+                              web_defs={"web:7f3a21": {"sources": [], "addedAt": ""}}, build_web=explode)
+        self.assertEqual([c["title"] for c in cache["roots"]["main"]["courses"]], ["A"])
+        self.assertIn("yt-dlp exploded", cache["roots"]["web"]["error"])
+
+    def test_a_read_older_than_the_setting_is_due(self):
+        old_tree = {"sources": {"a": {"fetchedAt": "2020-01-01T00:00:00+00:00"},
+                                "b": {"fetchedAt": store.now_iso()},
+                                "c": {"fetchedAt": "not a date"}}}
+        due = scan.web_due(old_tree, {"a": {}, "b": {}, "c": {}, "d": {}}, 24)
+        self.assertEqual(due, {"a", "c", "d"})
 
 
 if __name__ == "__main__":

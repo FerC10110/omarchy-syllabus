@@ -5,7 +5,7 @@ import os
 import re
 import secrets
 
-from . import covers, paths, progress, readily, scan, store, view as view_mod
+from . import covers, downloads, paths, progress, readily, scan, store, view as view_mod
 from .errors import NOTE_CHANGED, READILY, UNKNOWN, USAGE, SyllabusError
 
 SECTION_RE = re.compile(r"^[^\W_][\w -]{0,63}$")
@@ -20,6 +20,7 @@ class Context:
     """What the ops check ids against: the view of the documents as they are now."""
 
     def __init__(self, docs, cache):
+        self.cache = cache
         self.view = view_mod.build_view(docs.config, docs.library, docs.state, cache)
         self.courses = {c["id"]: c for c in self.view["courses"]}
         self.lessons = {l["id"]: l for c in self.view["courses"] for l in c["lessons"]}
@@ -190,6 +191,61 @@ def op_folder_layout(docs, ctx, p):
     else:
         docs.library["folders"][folder_id] = {"layout": layout}
     return {"rescan": True}
+
+
+def _web_definition(docs, course_id):
+    definition = docs.library["web"].get(course_id)
+    if not isinstance(definition, dict):
+        raise SyllabusError("Unknown web course", UNKNOWN)
+    return definition
+
+
+def op_web_remove(docs, ctx, p):
+    """A whole web course: its sources, its downloaded files and everything on it."""
+    course_id = _str(p, "courseId", True)
+    _web_definition(docs, course_id)
+    # Stop the worker before anything is deleted: left running, it would keep
+    # writing files and re-registering downloads for a course that no longer exists.
+    downloads.stop(course_id)
+    prefix = course_id + "/"
+    ours = [k for k in docs.state.get("downloads", {}) if k.startswith(prefix)]
+    removed = downloads.delete_files(docs.config, docs.state, ours)
+    docs.library["web"].pop(course_id, None)
+    docs.library["courses"].pop(course_id, None)
+    for table in (docs.library["lessons"], docs.state["lessons"]):
+        for lesson_id in [k for k in table if k.startswith(prefix)]:
+            table.pop(lesson_id, None)
+    if str(((docs.state.get("last") or {}).get("lessonId") or "")).startswith(prefix):
+        docs.state["last"] = None
+    for roadmap in docs.library["roadmaps"]:
+        for stage in roadmap.get("stages", []):
+            stage["courseIds"] = [c for c in stage.get("courseIds", []) if c != course_id]
+    try:
+        os.unlink(paths.note_path(course_id))
+    except OSError:
+        pass
+    return {"rescan": True, "removed": removed["removed"]}
+
+
+def op_web_remove_video(docs, ctx, p):
+    """One of the loose videos added to a web course; the playlist's videos are not ours to drop."""
+    course_id = _str(p, "courseId", True)
+    lesson_id = _str(p, "lessonId", True)
+    definition = _web_definition(docs, course_id)
+    entry = scan.lesson_index(ctx.cache).get(lesson_id)
+    if entry is None or entry[1]["id"] != course_id:
+        raise SyllabusError("Unknown video", UNKNOWN)
+    lesson = entry[2]
+    if lesson.get("source") != "video":
+        raise SyllabusError("That video comes from the playlist, not from a link you added", USAGE)
+    definition["sources"] = [s for s in definition.get("sources", []) if s.get("url") != lesson.get("url")]
+    downloads.delete_files(docs.config, docs.state, [lesson_id])
+    docs.library["lessons"].pop(lesson_id, None)
+    docs.state["lessons"].pop(lesson_id, None)
+    over = docs.library["courses"].get(course_id) or {}
+    if isinstance(over.get("order"), list):
+        over["order"] = [i for i in over["order"] if i != lesson_id]
+    return {"rescan": True, "webIds": [course_id]}
 
 
 def op_lesson_set(docs, ctx, p):
@@ -520,6 +576,12 @@ CONFIG_KEYS = {
     "player.args": ("list",),
     "readily.enabled": ("bool",),
     "readily.section": ("section",),
+    "web.quality": ("choice", store.QUALITIES),
+    "web.downloadFolder": ("folder",),
+    "web.refreshHours": ("number", 1, 168),
+    "web.subtitleLanguages": ("langs",),
+    "web.autoSubtitles": ("bool",),
+    "web.audioLanguage": ("lang",),
 }
 
 
@@ -539,6 +601,22 @@ def op_config_set(docs, ctx, p):
             raise SyllabusError(f"{key} must be a list of words", USAGE)
     elif kind == "bool":
         value = _bool(p, "value")
+    elif kind == "choice":
+        value = _str(p, "value", True)
+        if value not in spec[1]:
+            raise SyllabusError(f"{key} must be one of: " + ", ".join(spec[1]), USAGE)
+    elif kind == "folder":
+        value = os.path.expanduser(_str(p, "value", True)).rstrip("/")
+        if not os.path.isabs(value):
+            raise SyllabusError("The download folder must be an absolute path", USAGE)
+    elif kind == "langs":
+        value = p.get("value")
+        if not isinstance(value, list) or not all(isinstance(v, str) and store.LANG_RE.match(v) for v in value):
+            raise SyllabusError("Subtitle languages are codes like es or en", USAGE)
+    elif kind == "lang":
+        value = _str(p, "value") or ""
+        if value and not store.LANG_RE.match(value):
+            raise SyllabusError("An audio language is a code like es or en", USAGE)
     else:
         value = _str(p, "value", True)
         if not SECTION_RE.match(value):
@@ -555,6 +633,8 @@ OPS = {
     "course.set": op_course_set,
     "cover.set": op_cover_set,
     "folder.layout": op_folder_layout,
+    "web.remove": op_web_remove,
+    "web.removeVideo": op_web_remove_video,
     "lesson.set": op_lesson_set,
     "lesson.move": op_lesson_move,
     "seen.set": op_seen_set,

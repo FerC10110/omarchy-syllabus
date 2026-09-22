@@ -53,7 +53,7 @@ Column {
     implicitHeight: line.implicitHeight + 2 * Style.spacing.md
     radius: Style.cornerRadius
     color: row.expanded ? Style.selectedFill : "transparent"
-    opacity: row.lesson.hidden ? 0.55 : 1
+    opacity: row.lesson.hidden || row.lesson.available === false ? 0.55 : 1
 
     RowLayout {
       id: line
@@ -124,8 +124,27 @@ Column {
         onClicked: row.toggleBookmarks()
       }
 
+      Text {
+        visible: row.lesson.downloaded === true
+        text: Model.icon("download")
+        color: Color.muted
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+        // A tooltip is enough: the file is an implementation detail, not an action.
+      }
+
+      Text {
+        visible: row.lesson.available === false
+        text: "Not available"
+        color: Color.muted
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+      }
+
       Button {
-        visible: !row.editing
+        // A gone-but-downloaded video still plays from its own file: only a video with
+        // neither a file nor a link left has no Play button.
+        visible: !row.editing && (row.lesson.available !== false || row.lesson.downloaded === true)
         iconText: Model.icon("play")
         text: row.status === "started" ? "Resume" : (row.status === "seen" ? "Again" : "Play")
         // "Again" means from the start: a video left at 92 % would otherwise
@@ -171,6 +190,15 @@ Column {
         iconText: Model.icon(row.lesson.hidden ? "eye" : "eyeOff")
         tooltipText: row.lesson.hidden ? "Show in the course" : "Hide from the course"
         onClicked: row.app.apply({ op: "lesson.set", lessonId: row.lesson.id, hidden: !row.lesson.hidden })
+      }
+
+      Button {
+        visible: row.editing && row.lesson.source === "video"
+        iconText: Model.icon("trash")
+        tooltipText: "Remove this video from the course"
+        onClicked: row.app.ask("Remove \"" + row.lesson.title + "\" from the course?", "Remove", function() {
+          row.app.apply({ op: "web.removeVideo", courseId: row.course.id, lessonId: row.lesson.id })
+        })
       }
     }
   }

@@ -48,6 +48,14 @@ Item {
         onClicked: root.showHidden = !root.showHidden
       }
 
+      Button {
+        visible: root.editing && root.course && root.course.web !== null
+        iconText: Model.icon("plus")
+        text: "Add a video"
+        tooltipText: "Paste another link into this course"
+        onClicked: root.app.openWebAdd(root.course.id)
+      }
+
       Item { Layout.fillWidth: true }
     }
 

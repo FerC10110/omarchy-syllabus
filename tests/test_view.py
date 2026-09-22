@@ -1,9 +1,10 @@
 import datetime
 import os
 import unittest
+from unittest import mock
 
 from support import TempHome
-from syllabus import paths, store, view
+from syllabus import downloads, paths, store, view
 
 
 def lesson(course_rel, name, title, group=""):
@@ -149,6 +150,138 @@ class Build(TempHome):
         self.assertEqual(view.fmt_clock(65), "1:05")
         self.assertEqual(view.fmt_study(4800), "1h20")
         self.assertEqual(view.fmt_study(1500), "25 min")
+
+
+def web_lesson(course_id, video_id, title, duration, available=True, source="playlist"):
+    return {"id": f"{course_id}/youtube:{video_id}", "title": title, "name": title, "number": None, "group": "",
+            "relpath": "", "url": f"https://www.youtube.com/watch?v={video_id}", "site": "youtube",
+            "videoId": video_id, "available": available, "source": source, "duration": duration}
+
+
+class WebCourses(TempHome):
+    def setUp(self):
+        super().setUp()
+        self.config = store.load_config()
+        self.config["roots"] = []
+        lessons = [web_lesson("web:7f3a21", "aaa", "One", 600.0),
+                   web_lesson("web:7f3a21", "bbb", "Two", 1200.0),
+                   web_lesson("web:7f3a21", "ccc", "Gone", 300.0, available=False)]
+        self.cache = {"version": 1, "roots": {"web": {
+            "courses": [{"id": "web:7f3a21", "rootId": "web", "relpath": "", "folderId": "",
+                         "title": "Deep Learning", "topic": "", "lessons": lessons, "docs": [], "images": [],
+                         "autoCover": "", "coverPath": "", "sourceUrl": "https://www.youtube.com/playlist?list=PL",
+                         "sourceKind": "playlist"}],
+            "images": [], "folders": {}, "fetchedAt": "2026-09-22T10:00:00+00:00",
+            "sources": {"web:7f3a21": {"fetchedAt": "2026-09-22T10:00:00+00:00", "error": ""}}}},
+            "files": {"web:7f3a21/youtube:aaa": {"duration": 600.0},
+                      "web:7f3a21/youtube:bbb": {"duration": 1200.0},
+                      "web:7f3a21/youtube:ccc": {"duration": 300.0}}}
+        self.library = store.empty_library()
+        self.library["web"] = {"web:7f3a21": {"sources": [{"kind": "playlist",
+                                                           "url": "https://www.youtube.com/playlist?list=PL"}],
+                                              "addedAt": "2026-09-19T12:00:00+00:00"}}
+        self.state = store.empty_state()
+
+    def build(self):
+        return view.build_view(self.config, self.library, self.state, self.cache)
+
+    def test_the_web_root_is_always_online(self):
+        root = next(r for r in self.build()["roots"] if r["id"] == "web")
+        self.assertTrue(root["online"])
+        self.assertEqual(root["error"], "")
+        self.assertEqual(root["path"], "")
+        self.assertEqual(root["scannedAt"], "2026-09-22T10:00:00+00:00")
+        self.assertEqual(root["courseCount"], 1)
+
+    def test_a_web_step_that_failed_on_the_first_scan_still_shows_its_error(self):
+        self.cache["roots"]["web"] = {"courses": [], "images": [], "folders": {}, "sources": {},
+                                      "fetchedAt": "", "error": "Could not read the web courses: boom"}
+        root = next(r for r in self.build()["roots"] if r["id"] == "web")
+        self.assertEqual(root["error"], "Could not read the web courses: boom")
+        self.assertEqual(root["courseCount"], 0)
+        self.assertTrue(root["online"])
+
+    def test_the_course_says_where_it_came_from(self):
+        course = self.build()["courses"][0]
+        self.assertEqual(course["web"]["kind"], "playlist")
+        self.assertEqual(course["web"]["url"], "https://www.youtube.com/playlist?list=PL")
+        self.assertEqual(course["web"]["videoCount"], 3)
+        self.assertEqual(course["web"]["goneCount"], 1)
+        self.assertEqual(course["web"]["downloadedCount"], 0)
+        self.assertEqual(course["web"]["sources"], [{"kind": "playlist",
+                                                     "url": "https://www.youtube.com/playlist?list=PL"}])
+        self.assertTrue(course["online"])
+
+    def test_a_video_that_is_gone_stays_visible_but_out_of_the_totals(self):
+        course = self.build()["courses"][0]
+        self.assertEqual([l["title"] for l in course["lessons"]], ["One", "Two", "Gone"])
+        self.assertFalse(course["lessons"][2]["available"])
+        self.assertEqual(course["lessonCount"], 2)
+        self.assertEqual(course["duration"], 1800.0)
+
+    def test_a_gone_video_is_never_what_continue_plays(self):
+        self.state["lessons"] = {"web:7f3a21/youtube:aaa": {"pos": 600.0, "seen": True, "duration": 600.0},
+                                 "web:7f3a21/youtube:bbb": {"pos": 1200.0, "seen": True, "duration": 1200.0}}
+        self.state["last"] = {"lessonId": "web:7f3a21/youtube:bbb"}
+        self.assertIsNone(self.build()["continue"])
+        self.assertNotEqual((self.build()["continue"] or {}).get("lessonId"), "web:7f3a21/youtube:ccc")
+
+    def test_a_downloaded_video_says_so_and_adds_its_size(self):
+        self.state["downloads"] = {"web:7f3a21/youtube:aaa": {"path": "/tmp/one.mkv", "size": 1024,
+                                                              "at": "2026-09-22T10:00:00+00:00"}}
+        course = self.build()["courses"][0]
+        self.assertTrue(course["lessons"][0]["downloaded"])
+        self.assertFalse(course["lessons"][1]["downloaded"])
+        self.assertEqual(course["web"]["downloadedCount"], 1)
+        self.assertEqual(course["web"]["downloadedBytes"], 1024)
+
+    def test_pending_count_ignores_a_gone_lesson_even_when_it_was_downloaded(self):
+        # "ccc" is gone but was downloaded before it went; "aaa" and "bbb" are still
+        # available and not downloaded. downloadedCount counts every saved file, gone or
+        # not, but pendingCount must only count what Download can still fetch.
+        self.state["downloads"] = {"web:7f3a21/youtube:ccc": {"path": "/tmp/gone.mkv", "size": 10, "at": ""}}
+        course = self.build()["courses"][0]
+        self.assertEqual(course["web"]["downloadedCount"], 1)
+        self.assertEqual(course["web"]["pendingCount"], 2)
+
+    def test_pending_count_is_zero_once_every_available_video_is_downloaded(self):
+        self.state["downloads"] = {
+            "web:7f3a21/youtube:aaa": {"path": "/tmp/a.mkv", "size": 1, "at": ""},
+            "web:7f3a21/youtube:bbb": {"path": "/tmp/b.mkv", "size": 1, "at": ""},
+        }
+        course = self.build()["courses"][0]
+        self.assertEqual(course["web"]["pendingCount"], 0)
+
+    def test_a_junk_download_size_counts_as_zero_instead_of_raising(self):
+        self.state["downloads"] = {"web:7f3a21/youtube:aaa": {"path": "/tmp/one.mkv", "size": "oops",
+                                                              "at": "2026-09-22T10:00:00+00:00"}}
+        self.assertEqual(self.build()["courses"][0]["web"]["downloadedBytes"], 0)
+
+    def test_a_running_download_shows_its_progress(self):
+        course = self.build()["courses"][0]
+        self.assertFalse(course["web"]["downloading"])
+        store.write_json(paths.download_path("web:7f3a21"),
+                         {"courseId": "web:7f3a21", "pid": 1, "total": 3, "done": 1, "current": "01 - One"})
+        # The pid is made up, so the worker check has to be the one thing stubbed here.
+        with mock.patch.object(downloads, "_is_worker", return_value=True):
+            course = self.build()["courses"][0]
+        self.assertTrue(course["web"]["downloading"])
+        self.assertEqual((course["web"]["downloadDone"], course["web"]["downloadTotal"]), (1, 3))
+
+    def test_a_download_whose_worker_is_gone_is_not_shown_as_running(self):
+        store.write_json(paths.download_path("web:7f3a21"),
+                         {"courseId": "web:7f3a21", "pid": os.getpid(), "total": 3, "done": 1, "current": "One"})
+        course = self.build()["courses"][0]
+        self.assertFalse(course["web"]["downloading"])
+        self.assertFalse(os.path.exists(paths.download_path("web:7f3a21")))
+
+    def test_a_disk_course_has_no_web_block(self):
+        self.cache["roots"]["main"] = {"path": self.tmp, "scannedAt": "", "courses": [
+            {"id": "main:A", "rootId": "main", "relpath": "A", "folderId": "main:A", "title": "A", "topic": "",
+             "autoCover": "", "images": [], "docs": [], "lessons": []}], "images": [], "folders": {}}
+        self.config["roots"] = [{"id": "main", "path": self.tmp}]
+        disk = next(c for c in self.build()["courses"] if c["id"] == "main:A")
+        self.assertIsNone(disk["web"])
 
 
 if __name__ == "__main__":

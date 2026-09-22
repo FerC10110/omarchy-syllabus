@@ -73,7 +73,8 @@ Item {
 
             Text {
               Layout.fillWidth: true
-              text: Model.icon("disk") + "  " + modelData.path
+              text: modelData.id === "web" ? Model.icon("web") + "  Web"
+                                           : Model.icon("disk") + "  " + modelData.path
               elide: Text.ElideMiddle
               color: Color.foreground
               font.family: Style.font.family
@@ -81,9 +82,28 @@ Item {
             }
 
             Text {
+              visible: modelData.id !== "web"
               text: (modelData.online ? "Mounted" : "Not mounted") + " · " + modelData.courseCount + " courses · scanned "
                 + Model.fmtWhen(modelData.scannedAt)
               color: modelData.online ? Color.muted : Color.urgent
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
+
+            Text {
+              visible: modelData.id === "web"
+              text: "Last read " + Model.fmtAgo(modelData.scannedAt)
+              color: Color.muted
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
+
+            Text {
+              Layout.fillWidth: true
+              wrapMode: Text.Wrap
+              visible: modelData.id === "web" && modelData.error !== ""
+              text: modelData.error || ""
+              color: Color.urgent
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
             }
@@ -203,6 +223,89 @@ Item {
           description: "Where saved links go. Created if it does not exist."
           text: root.config.readily.section
           onCommitted: function(text) { root.set("readily.section", text) }
+        }
+
+        Text {
+          text: "WEB"
+          color: Color.accent
+          font.family: Style.font.family
+          font.pixelSize: Style.font.caption
+          font.bold: true
+        }
+
+        Text {
+          Layout.fillWidth: true
+          wrapMode: Text.Wrap
+          text: "For courses that come from YouTube or Vimeo. Videos on your disk are not affected."
+          color: Color.muted
+          font.family: Style.font.family
+          font.pixelSize: Style.font.caption
+        }
+
+        RowLayout {
+          spacing: Style.spacing.sm
+
+          Text {
+            text: "Web video quality"
+            color: Color.foreground
+            font.family: Style.font.family
+            font.pixelSize: Style.font.body
+          }
+
+          Repeater {
+            model: [{ key: "720p", label: "720p" }, { key: "1080p", label: "1080p" }, { key: "best", label: "Best" }]
+
+            Button {
+              text: modelData.label
+              selected: root.config.web.quality === modelData.key
+              onClicked: root.set("web.quality", modelData.key)
+            }
+          }
+        }
+
+        SettingField {
+          Layout.fillWidth: true
+          label: "Download folder"
+          description: "Where Download puts the videos of a web course."
+          text: root.config.web.downloadFolder
+          onCommitted: function(text) { root.set("web.downloadFolder", text) }
+        }
+
+        SettingField {
+          Layout.fillWidth: true
+          label: "Subtitle languages"
+          description: "Codes separated by commas, most wanted first, e.g. es, en. Empty: no subtitles. "
+                       + "Only the ones the site publishes with the video."
+          text: root.config.web.subtitleLanguages.join(", ")
+          onCommitted: function(text) { root.set("web.subtitleLanguages", Model.splitLangs(text)) }
+        }
+
+        Toggle {
+          Layout.fillWidth: true
+          Layout.maximumWidth: 520
+          visible: root.config.web.subtitleLanguages.length > 0
+          label: "Include automatic subtitles"
+          description: "YouTube's machine-made captions, when the video has no written ones."
+          checked: root.config.web.autoSubtitles
+          onClicked: root.set("web.autoSubtitles", !root.config.web.autoSubtitles)
+        }
+
+        SettingField {
+          Layout.fillWidth: true
+          label: "Audio language"
+          description: "A code like es for YouTube's dubbed audio. Empty: the video's own audio. "
+                       + "A video without that dub plays with the audio it has, and the change "
+                       + "applies from the next video you open."
+          text: root.config.web.audioLanguage
+          placeholder: "the video's own audio"
+          onCommitted: function(text) { root.set("web.audioLanguage", text.trim()) }
+        }
+
+        SettingField {
+          Layout.fillWidth: true
+          label: "Read the playlists again every (hours)"
+          text: String(root.config.web.refreshHours)
+          onCommitted: function(text) { root.setNumber("web.refreshHours", text) }
         }
 
         Text {

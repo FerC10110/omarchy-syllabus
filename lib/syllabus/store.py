@@ -6,12 +6,16 @@ import datetime
 import fcntl
 import json
 import os
+import re
 import tempfile
 
 from . import paths
 from .errors import GENERAL, SyllabusError
 
 DEFAULT_ROOT = "~/Videos/Courses"
+DEFAULT_DOWNLOADS = "~/Videos/Syllabus"
+QUALITIES = ("720p", "1080p", "best")
+LANG_RE = re.compile(r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})?$")
 DEFAULT_CONFIG = {
     "version": 1,
     "roots": [{"id": "main", "path": DEFAULT_ROOT}],
@@ -21,6 +25,8 @@ DEFAULT_CONFIG = {
     "reportSeconds": 30,
     "streakMinutes": 10,
     "readily": {"enabled": True, "section": "Cursos"},
+    "web": {"quality": "1080p", "downloadFolder": DEFAULT_DOWNLOADS, "refreshHours": 24,
+            "subtitleLanguages": ["es", "en"], "autoSubtitles": True, "audioLanguage": ""},
 }
 
 
@@ -112,6 +118,14 @@ def load_config():
     config["roots"] = [{"id": r["id"], "path": os.path.expanduser(r["path"]).rstrip("/") or "/"}
                        for r in config["roots"] if _valid_root(r)]
     config["player"]["args"] = [a for a in config["player"]["args"] if isinstance(a, str)]
+    web = config["web"]
+    web["downloadFolder"] = os.path.expanduser(web["downloadFolder"]).rstrip("/") or "/"
+    if web["quality"] not in QUALITIES:
+        web["quality"] = DEFAULT_CONFIG["web"]["quality"]
+    web["refreshHours"] = min(168.0, max(1.0, float(web["refreshHours"])))
+    web["subtitleLanguages"] = [l for l in web["subtitleLanguages"] if isinstance(l, str) and LANG_RE.match(l)]
+    if not LANG_RE.match(web["audioLanguage"]):
+        web["audioLanguage"] = ""
     return config
 
 
@@ -122,13 +136,13 @@ def save_config(config):
 # --- library -----------------------------------------------------------------
 
 def empty_library():
-    return {"version": 1, "folders": {}, "courses": {}, "lessons": {}, "roadmaps": []}
+    return {"version": 1, "folders": {}, "courses": {}, "lessons": {}, "roadmaps": [], "web": {}}
 
 
 def load_library():
     data = read_json(paths.library_path(), {})
     library = empty_library()
-    for key in ("folders", "courses", "lessons"):
+    for key in ("folders", "courses", "lessons", "web"):
         if isinstance(data.get(key), dict):
             library[key] = {k: v for k, v in data[key].items() if isinstance(v, dict)}
     if isinstance(data.get("roadmaps"), list):
@@ -143,7 +157,7 @@ def save_library(library):
 # --- state -------------------------------------------------------------------
 
 def empty_state():
-    return {"version": 1, "lessons": {}, "last": None, "days": {}, "window": {}}
+    return {"version": 1, "lessons": {}, "last": None, "days": {}, "window": {}, "downloads": {}}
 
 
 def _window(data):
@@ -168,6 +182,9 @@ def load_state():
     if isinstance(data.get("days"), dict):
         state["days"] = {k: v for k, v in data["days"].items() if isinstance(v, dict)}
     state["window"] = _window(data.get("window"))
+    if isinstance(data.get("downloads"), dict):
+        state["downloads"] = {k: v for k, v in data["downloads"].items()
+                              if isinstance(v, dict) and isinstance(v.get("path"), str)}
     return state
 
 

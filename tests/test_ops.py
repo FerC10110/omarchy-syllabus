@@ -1,5 +1,8 @@
 import os
+import subprocess
+import sys
 import unittest
+from unittest import mock
 
 from support import TempHome, install_fake_ffprobe, make_tree
 from syllabus import ops, paths, probe, scan, store
@@ -328,6 +331,145 @@ class Config(OpsCase):
         self.fails(2, op="config.set", key="readily.section", value="_bad")
         self.fails(2, op="config.set", key="player.args", value="--fs")
         self.fails(2, op="config.set", key="roots", value=[])
+
+
+class WebConfig(OpsCase):
+    def test_every_web_setting_can_be_changed(self):
+        self.apply(op="config.set", key="web.quality", value="720p")
+        self.apply(op="config.set", key="web.refreshHours", value=6)
+        self.apply(op="config.set", key="web.subtitleLanguages", value=["pt", "en"])
+        self.apply(op="config.set", key="web.autoSubtitles", value=False)
+        self.apply(op="config.set", key="web.audioLanguage", value="es")
+        self.apply(op="config.set", key="web.downloadFolder", value=os.path.join(self.tmp, "bajados"))
+        web = store.load_config()["web"]
+        self.assertEqual(web["quality"], "720p")
+        self.assertEqual(web["refreshHours"], 6)
+        self.assertEqual(web["subtitleLanguages"], ["pt", "en"])
+        self.assertIs(web["autoSubtitles"], False)
+        self.assertEqual(web["audioLanguage"], "es")
+        self.assertEqual(web["downloadFolder"], os.path.join(self.tmp, "bajados"))
+
+    def test_an_empty_audio_language_means_the_original(self):
+        self.apply(op="config.set", key="web.audioLanguage", value="es")
+        self.apply(op="config.set", key="web.audioLanguage", value="")
+        self.assertEqual(store.load_config()["web"]["audioLanguage"], "")
+
+    def test_bad_web_values_are_refused(self):
+        from syllabus.errors import USAGE
+        self.fails(USAGE, op="config.set", key="web.quality", value="4k")
+        self.fails(USAGE, op="config.set", key="web.subtitleLanguages", value=["español"])
+        self.fails(USAGE, op="config.set", key="web.audioLanguage", value="castellano")
+        self.fails(USAGE, op="config.set", key="web.refreshHours", value=0)
+        self.fails(USAGE, op="config.set", key="web.downloadFolder", value="bajados")
+
+
+class WebOps(OpsCase):
+    def setUp(self):
+        super().setUp()
+        self.course_id = "web:7f3a21"
+        self.other_id = "web:999999"
+        self.downloads_dir = os.path.join(self.tmp, "bajados")
+        os.makedirs(self.downloads_dir)
+        store.write_json(paths.config_path(), {"roots": [{"id": "main", "path": self.root}],
+                                                "web": {"downloadFolder": self.downloads_dir}})
+        lesson = {"id": self.course_id + "/youtube:aaa", "title": "Uno", "name": "Uno", "number": None,
+                  "group": "", "relpath": "", "url": "https://www.youtube.com/watch?v=aaa", "site": "youtube",
+                  "videoId": "aaa", "available": True, "source": "playlist", "duration": 600.0}
+        loose = dict(lesson, id=self.course_id + "/vimeo:111", url="https://vimeo.com/111", site="vimeo",
+                     videoId="111", source="video", title="Extra", name="Extra")
+        self.cache["roots"]["web"] = {"courses": [{"id": self.course_id, "rootId": "web", "relpath": "",
+                                                   "folderId": "", "title": "Curso", "topic": "",
+                                                   "lessons": [lesson, loose], "docs": [], "images": [],
+                                                   "autoCover": "", "coverPath": "", "sourceUrl": "https://p",
+                                                   "sourceKind": "playlist"}],
+                                      "images": [], "folders": {}, "sources": {}, "fetchedAt": ""}
+        library = store.load_library()
+        library["web"] = {self.course_id: {"sources": [{"kind": "playlist", "url": "https://p"},
+                                                       {"kind": "video", "url": "https://vimeo.com/111"}],
+                                           "addedAt": ""},
+                          self.other_id: {"sources": [{"kind": "playlist", "url": "https://q"}], "addedAt": ""}}
+        library["courses"][self.course_id] = {"title": "Curso", "tasks": [{"id": "t", "text": "x", "done": False}]}
+        library["roadmaps"] = [{"id": "r", "title": "R", "stages": [{"id": "s", "title": "S",
+                                                                     "courseIds": [self.course_id, "main:A"]}]}]
+        store.save_library(library)
+
+        def download(name, content):
+            path = os.path.join(self.downloads_dir, name)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+            return path
+
+        # A downloaded file (and progress) for each of this course's two lessons, plus one
+        # for an unrelated web course sitting in the same download folder, so removal can be
+        # checked for both "everything of this course is gone" and "nothing else was touched".
+        self.playlist_file = download("uno.mkv", "video")
+        self.loose_file = download("extra.mkv", "extra video")
+        self.other_file = download("otro.mkv", "other course video")
+        self.other_lesson_id = self.other_id + "/youtube:zzz"
+        with store.transaction() as docs:
+            docs.state["downloads"] = {
+                lesson["id"]: {"path": self.playlist_file, "size": os.path.getsize(self.playlist_file), "at": ""},
+                loose["id"]: {"path": self.loose_file, "size": os.path.getsize(self.loose_file), "at": ""},
+                self.other_lesson_id: {"path": self.other_file, "size": os.path.getsize(self.other_file), "at": ""},
+            }
+            docs.state["lessons"][lesson["id"]] = {"pos": 42.0, "duration": 600.0, "seen": False}
+            docs.state["lessons"][loose["id"]] = {"pos": 10.0, "duration": 120.0, "seen": False}
+            docs.state["last"] = {"lessonId": lesson["id"], "at": ""}
+
+    def test_removing_a_web_course_takes_everything_with_it(self):
+        result = self.apply(op="web.remove", courseId=self.course_id)
+        self.assertTrue(result["rescan"])
+        self.assertEqual(result["removed"], 2)
+        self.assertFalse(os.path.exists(self.playlist_file))
+        self.assertFalse(os.path.exists(self.loose_file))
+        self.assertTrue(os.path.exists(self.other_file))
+        state = store.load_state()
+        self.assertEqual(set(state["downloads"]), {self.other_lesson_id})
+        self.assertEqual(state["lessons"], {})
+        self.assertIsNone(state["last"])
+        library = self.library()
+        self.assertNotIn(self.course_id, library["web"])
+        self.assertNotIn(self.course_id, library["courses"])
+        self.assertEqual(library["roadmaps"][0]["stages"][0]["courseIds"], ["main:A"])
+
+    def test_removing_a_loose_video_only_drops_that_source(self):
+        result = self.apply(op="web.removeVideo", courseId=self.course_id,
+                            lessonId=self.course_id + "/vimeo:111")
+        self.assertEqual(result["webIds"], [self.course_id])
+        self.assertEqual(self.library()["web"][self.course_id]["sources"],
+                         [{"kind": "playlist", "url": "https://p"}])
+        self.assertFalse(os.path.exists(self.loose_file))
+        self.assertTrue(os.path.exists(self.playlist_file))
+        self.assertTrue(os.path.exists(self.other_file))
+        state = store.load_state()
+        self.assertNotIn(self.course_id + "/vimeo:111", state["downloads"])
+        self.assertIn(self.course_id + "/youtube:aaa", state["downloads"])
+        self.assertNotIn(self.course_id + "/vimeo:111", state["lessons"])
+        self.assertIn(self.course_id + "/youtube:aaa", state["lessons"])
+
+    def test_a_video_from_the_playlist_cannot_be_removed_one_by_one(self):
+        from syllabus.errors import USAGE
+        self.fails(USAGE, op="web.removeVideo", courseId=self.course_id,
+                   lessonId=self.course_id + "/youtube:aaa")
+
+    def test_removing_a_web_course_stops_a_running_download_first(self):
+        # The worker is a real process we spawned and own; _is_worker is stubbed only
+        # because its cmdline does not literally name this course. If web.remove did not
+        # stop it before deleting, the worker would be left running with no registry left
+        # to record what it finishes.
+        worker = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+        try:
+            store.write_json(paths.download_path(self.course_id),
+                             {"courseId": self.course_id, "pid": worker.pid, "total": 1, "done": 0,
+                              "current": "", "failed": []})
+            with mock.patch.object(ops.downloads, "_is_worker", return_value=True):
+                self.apply(op="web.remove", courseId=self.course_id)
+            worker.wait(timeout=5)
+            self.assertIsNotNone(worker.poll())
+        finally:
+            if worker.poll() is None:
+                worker.terminate()
+                worker.wait(timeout=5)
 
 
 if __name__ == "__main__":

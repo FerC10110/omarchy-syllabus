@@ -19,9 +19,10 @@ Item {
     { key: "videos", label: "Videos" },
     { key: "tasks", label: "Tasks" + (course.taskCount > 0 ? " " + course.taskDone + "/" + course.taskCount : "") },
     { key: "links", label: "Links" + (course.links.length > 0 ? " " + course.links.length : "") },
-    { key: "notes", label: "Notes" + (course.hasNote ? " •" : "") },
-    { key: "files", label: "Files" + (course.docCount > 0 ? " " + course.docCount : "") }
-  ] : []
+    { key: "notes", label: "Notes" + (course.hasNote ? " •" : "") }
+  ].concat(course.web ? [] : [{ key: "files", label: "Files" + (course.docCount > 0 ? " " + course.docCount : "") }]) : []
+
+  onCourseChanged: if (course && course.web && tab === "files") tab = "videos"
 
   Loader {
     anchors.fill: parent
@@ -73,6 +74,62 @@ Item {
             font.family: Style.font.family
             font.pixelSize: Style.font.heading
             font.bold: true
+          }
+
+          RowLayout {
+            Layout.fillWidth: true
+            visible: root.course.web !== null
+            spacing: Style.spacing.sm
+
+            Text {
+              Layout.fillWidth: true
+              elide: Text.ElideRight
+              text: Model.webSourceLine(root.course)
+              color: root.course.web && root.course.web.error ? Color.urgent : Color.muted
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
+
+            Button {
+              iconText: Model.icon("open")
+              tooltipText: "Open it in the browser"
+              visible: root.course.web && root.course.web.url !== ""
+              onClicked: root.app.openExternal(root.course.web.url)
+            }
+
+            Button {
+              iconText: Model.icon("refresh")
+              tooltipText: "Read it again now"
+              onClicked: root.app.webRefresh(root.course.id)
+            }
+
+            Button {
+              // pendingCount already excludes gone videos: a course whose rest is gone
+              // has nothing left to offer, but a gone-and-downloaded video must not hide
+              // the button while other, still-available videos are missing.
+              visible: root.course.web && !root.course.web.downloading
+                       && root.course.web.pendingCount > 0
+              iconText: Model.icon("download")
+              text: "Download"
+              tooltipText: "Keep the videos on this computer"
+              onClicked: root.app.download(root.course.id, false)
+            }
+
+            Button {
+              visible: root.course.web && root.course.web.downloading
+              iconText: Model.icon("stop")
+              text: root.course.web ? "Downloading " + (root.course.web.downloadDone + 1) + " of "
+                                      + root.course.web.downloadTotal + " · Stop" : ""
+              onClicked: root.app.download(root.course.id, true)
+            }
+
+            Text {
+              visible: root.course.web && root.course.web.downloadedBytes > 0
+              text: root.course.web ? Model.fmtBytes(root.course.web.downloadedBytes) : ""
+              color: Color.muted
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
           }
 
           Text {

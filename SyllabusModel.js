@@ -9,7 +9,8 @@ var ICON = {
   up: 0xF005D, down: 0xF0045, chevronLeft: 0xF0141, chevronRight: 0xF0142, chevronDown: 0xF0140,
   close: 0xF0156, cog: 0xF0493, roadmap: 0xF046A, library: 0xF0331, fire: 0xF0238, file: 0xF0219,
   copy: 0xF018F, open: 0xF03CC, eyeOff: 0xF0209, eye: 0xF0208, note: 0xF082E, refresh: 0xF0450,
-  disk: 0xF02CA, save: 0xF0193, pin: 0xF0403, pinOff: 0xF0404
+  disk: 0xF02CA, save: 0xF0193, pin: 0xF0403, pinOff: 0xF0404,
+  web: 0xF059F, download: 0xF01DA, stop: 0xF04DB
 }
 
 function icon(name) {
@@ -48,6 +49,30 @@ function fmtWhen(iso) {
   var d = new Date(t)
   return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()) + " "
     + pad2(d.getHours()) + ":" + pad2(d.getMinutes())
+}
+
+function fmtAgo(iso) {
+  if (!iso) return ""
+  var seconds = (Date.now() - Date.parse(iso)) / 1000
+  if (!isFinite(seconds)) return ""
+  if (seconds < 60) return "just now"
+  if (seconds < 3600) return Math.floor(seconds / 60) + " min ago"
+  if (seconds < 24 * 3600) return Math.floor(seconds / 3600) + " h ago"
+  var days = Math.round(seconds / (24 * 3600))
+  return days === 1 ? "yesterday" : days + " days ago"
+}
+
+// "YouTube playlist · 24 videos · updated 2 h ago", or why the last read failed.
+function webSourceLine(course) {
+  var web = course && course.web
+  if (!web) return ""
+  if (web.error) return "Couldn't refresh: " + web.error
+  var site = /vimeo\.com/.test(web.url || "") ? "Vimeo" : "YouTube"
+  var parts = [web.kind === "playlist" ? site + " playlist" : site,
+               web.videoCount + (web.videoCount === 1 ? " video" : " videos")]
+  if (web.goneCount > 0) parts.push(web.goneCount + " not available")
+  if (web.fetchedAt) parts.push("updated " + fmtAgo(web.fetchedAt))
+  return parts.join(" · ")
 }
 
 // "95", "1:35" or "1:23:40" (seconds may have decimals) to seconds; -1 when it is none of those.
@@ -196,6 +221,13 @@ function linkText(link) {
 
 function splitArgs(text) {
   return String(text || "").trim().split(/\s+/).filter(function(s) { return s !== "" })
+}
+
+// "es, en" or "es,en " -> ["es", "en"]; anything empty falls out.
+function splitLangs(text) {
+  return String(text || "").split(",").map(function(part) { return part.trim() }).filter(function(part) {
+    return part !== ""
+  })
 }
 
 // The first course of the roadmap, in stage order, with something left to watch.

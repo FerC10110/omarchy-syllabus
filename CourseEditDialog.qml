@@ -251,32 +251,67 @@ Item {
             }
           }
 
-          Text {
-            visible: root.folder !== null
-            text: "Folder \"" + root.folderName + "\""
-            color: Color.muted
-            font.family: Style.font.family
-            font.pixelSize: Style.font.caption
+          ColumnLayout {
+            Layout.fillWidth: true
+            visible: root.folder !== null && root.course && root.course.web === null
+            spacing: Style.spacing.sm
+
+            Text {
+              text: "Folder \"" + root.folderName + "\""
+              color: Color.muted
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
+
+            Dropdown {
+              id: layoutPicker
+              Layout.fillWidth: true
+              showLabel: false
+              options: root.layoutOptions
+              onChanged: function(value) { root.layout = value }
+            }
+
+            Text {
+              Layout.fillWidth: true
+              wrapMode: Text.Wrap
+              text: "Applies to the whole folder. Regrouping keeps every video's progress and bookmarks; "
+                + "course tasks, links and notes belong to the grouping they were made in and come back if you switch back."
+              color: Color.muted
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
           }
 
-          Dropdown {
-            id: layoutPicker
-            visible: root.folder !== null
+          ColumnLayout {
             Layout.fillWidth: true
-            showLabel: false
-            options: root.layoutOptions
-            onChanged: function(value) { root.layout = value }
-          }
+            visible: root.course && root.course.web !== null
+            spacing: Style.spacing.sm
 
-          Text {
-            visible: root.folder !== null
-            Layout.fillWidth: true
-            wrapMode: Text.Wrap
-            text: "Applies to the whole folder. Regrouping keeps every video's progress and bookmarks; "
-              + "course tasks, links and notes belong to the grouping they were made in and come back if you switch back."
-            color: Color.muted
-            font.family: Style.font.family
-            font.pixelSize: Style.font.caption
+            Button {
+              iconText: Model.icon("refresh")
+              text: "Refresh now"
+              onClicked: root.app.webRefresh(root.course.id)
+            }
+
+            Button {
+              iconText: Model.icon("trash")
+              text: "Delete downloads"
+              visible: root.course && root.course.web && root.course.web.downloadedCount > 0
+              onClicked: root.app.ask("Delete the " + root.course.web.downloadedCount
+                                        + " downloaded videos of this course?", "Delete", function() {
+                root.app.deleteDownloads(root.course.id)
+              })
+            }
+
+            Button {
+              iconText: Model.icon("trash")
+              text: "Remove course"
+              onClicked: root.app.ask("Remove this course, its tasks, links, notes and bookmarks, and delete "
+                                        + "its downloaded videos? The videos stay on the web.", "Remove", function() {
+                root.cancel()
+                root.app.apply({ op: "web.remove", courseId: root.course.id }, function() { root.app.openLibrary("") })
+              })
+            }
           }
 
           RowLayout {

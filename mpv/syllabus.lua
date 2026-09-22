@@ -19,6 +19,7 @@ local seq = math.floor(os.time() * 1000)
 local current = nil       -- { path, pos, duration } of the loaded video
 local played = 0          -- seconds watched since the last report
 local playing_since = nil -- mp.get_time() when playback last started
+local loaded = false      -- whether the current file has successfully loaded
 
 -- Fire and forget: detached, and not tied to the playback lifetime, so a
 -- report sent while mpv is quitting still runs.
@@ -95,6 +96,10 @@ local function load_bookmarks(path)
   end)
 end
 
+mp.register_event("start-file", function()
+  loaded = false
+end)
+
 local function bookmark()
   if not current then
     return
@@ -125,6 +130,7 @@ local function bookmark()
 end
 
 mp.register_event("file-loaded", function()
+  loaded = true
   current = {
     path = mp.get_property("path"),
     pos = mp.get_property_number("time-pos") or 0,
@@ -163,6 +169,12 @@ end)
 -- After `loadfile replace` the old video ends with reason "stop" once `syllabus
 -- play` has already made the new one the last video.
 mp.register_event("end-file", function(event)
+  if event.reason == "error" and not loaded then
+    -- No internet, a link that died, or a disk that is not there: the cause reads the same.
+    local what = mp.get_property("media-title") or mp.get_property("path") or "that video"
+    run({ "notify-send", "-a", "Syllabus", "Syllabus",
+          "Couldn't play " .. what .. ": no internet, or the video is no longer available" })
+  end
   report(event.reason == "eof", event.reason ~= "eof" and event.reason ~= "quit")
   current = nil
   playing_since = nil

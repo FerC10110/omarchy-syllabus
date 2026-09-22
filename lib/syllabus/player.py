@@ -7,8 +7,58 @@ import subprocess
 from . import paths
 from .errors import PLAYER, SyllabusError
 
+QUALITY_HEIGHT = {"720p": 720, "1080p": 1080, "best": 0}
 
-def build_argv(config, media_path, start, sock):
+
+def format_selector(web):
+    """yt-dlp's format for a link: the quality cap, and the dubbed audio when one is asked
+    for. The chain always ends without the language, so a video that has no dub plays with
+    its original audio instead of failing. The audio cannot be switched later: ytdl_hook
+    exposes a link's tracks without their language, so this is the one chance to pick."""
+    height = QUALITY_HEIGHT.get(web.get("quality"), 1080)
+    language = str(web.get("audioLanguage") or "").strip()
+    if height:
+        plain = f"bv*[height<={height}]+ba/b[height<={height}]"
+        return f"bv*[height<={height}]+ba[language^={language}]/{plain}" if language else plain
+    return f"bv*+ba[language^={language}]/b" if language else ""
+
+
+def escape(value):
+    """mpv's escape inside a comma-separated list of values: %<bytes>%<value>."""
+    return f"%{len(value.encode('utf-8'))}%{value}" if ("," in value or "%" in value) else value
+
+
+def web_options(config, password=""):
+    """What a streamed link needs, as (name, value) pairs: they go on the command line as
+    --name=value and into `loadfile` as name=value. Subtitles are the ones the site
+    publishes with the video; nothing is looked up anywhere else."""
+    web = config.get("web") or {}
+    options, raw = [], []
+    selector = format_selector(web)
+    if selector:
+        options.append(("ytdl-format", selector))
+    languages = [l for l in (web.get("subtitleLanguages") or []) if isinstance(l, str) and l]
+    if languages:
+        options.append(("slang", ",".join(languages)))
+        raw.append("sub-langs=" + escape(",".join(languages)))
+        if web.get("autoSubtitles"):
+            raw.append("write-auto-subs=")
+    else:
+        options.append(("sid", "no"))
+    if password:
+        raw.append("video-password=" + escape(password))
+    if raw:
+        options.append(("ytdl-raw-options", ",".join(raw)))
+    return options
+
+
+def file_options(start, options):
+    """The per-file options `loadfile` takes. mpv reverts them when the file is unloaded,
+    so a disk video opened afterwards inherits nothing."""
+    return ",".join([f"start={float(start):.3f}"] + [f"{key}={escape(value)}" for key, value in options])
+
+
+def build_argv(config, media_path, start, sock, options=()):
     player = config["player"]
     return ([player["command"],
              "--force-window=immediate",
@@ -21,6 +71,7 @@ def build_argv(config, media_path, start, sock):
              # One option per flag: --script-opts would split on the commas some folders have.
              f"--script-opt=syllabus-bin={paths.BIN_PATH}",
              f"--script-opt=syllabus-report={int(config['reportSeconds'])}"]
+            + [f"--{key}={value}" for key, value in options]
             + [str(arg) for arg in player.get("args", [])]
             + ["--", media_path])
 
@@ -62,11 +113,11 @@ def is_alive(sock_path):
         raise SyllabusError(f"mpv did not answer: {e}", PLAYER)
 
 
-def play(config, media_path, start, sock=None, spawn=subprocess.Popen):
+def play(config, media_path, start, sock=None, spawn=subprocess.Popen, options=()):
     sock = sock or paths.socket_path()
     if is_alive(sock):
         try:
-            reply = request(sock, ["loadfile", media_path, "replace", -1, f"start={float(start):.3f}"])
+            reply = request(sock, ["loadfile", media_path, "replace", -1, file_options(start, options)])
         except OSError as e:
             raise SyllabusError(f"mpv did not answer: {e}", PLAYER)
         if reply.get("error") != "success":
@@ -78,7 +129,7 @@ def play(config, media_path, start, sock=None, spawn=subprocess.Popen):
         pass
     os.makedirs(os.path.dirname(sock), exist_ok=True)
     try:
-        spawn(build_argv(config, media_path, start, sock), stdin=subprocess.DEVNULL,
+        spawn(build_argv(config, media_path, start, sock, options), stdin=subprocess.DEVNULL,
               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
     except OSError as e:
         raise SyllabusError(f"Could not start {config['player']['command']}: {e.strerror or e}", PLAYER)

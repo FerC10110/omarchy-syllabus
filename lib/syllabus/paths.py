@@ -69,3 +69,9 @@ def socket_path():
 
 def lock_path():
     return os.path.join(runtime_dir(), "lock")
+
+
+def download_path(course_id):
+    """Where a running download writes its progress; the panel reads it, nobody else."""
+    name = str(course_id).replace(":", "-").replace("/", "-")
+    return os.path.join(runtime_dir(), f"download-{name}.json")

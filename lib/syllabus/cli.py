@@ -6,7 +6,7 @@ import os
 import subprocess
 import sys
 
-from . import covers, ops, paths, player, probe, progress, readily, scan, store, view
+from . import covers, downloads, ops, paths, player, probe, progress, readily, scan, store, view, web
 from .errors import GENERAL, OFFLINE, UNKNOWN, USAGE, SyllabusError
 
 
@@ -23,13 +23,27 @@ def current_view():
     return view.build_view(store.load_config(), store.load_library(), store.load_state(), store.load_scan())
 
 
-def lesson_for_path(config, path):
-    """The lesson id of a file under one of the roots, or None."""
-    path = os.path.normpath(path)
+def lesson_for_path(config, path, cache=None, state=None):
+    """The lesson a report is about: a file under a root, a link, or a downloaded file."""
+    text = str(path or "")
+    if text.startswith(("http://", "https://")):
+        cache = store.load_scan() if cache is None else cache
+        for lesson_id, (root_id, _course, lesson) in scan.lesson_index(cache).items():
+            if root_id == "web" and lesson.get("url") == text:
+                return lesson_id
+        return None
+    normalized = os.path.normpath(text)
+    # A downloaded file can sit under a scanned root (the scan skips web.downloadFolder on
+    # purpose): checking the registry first keeps it resolving to its web lesson instead of
+    # a phantom entry under that root.
+    state = store.load_state() if state is None else state
+    for lesson_id, record in (state.get("downloads") or {}).items():
+        if os.path.normpath(str(record.get("path") or "")) == normalized:
+            return lesson_id
     for root in config["roots"]:
         base = root["path"].rstrip("/")
-        if path.startswith(base + "/"):
-            return f"{root['id']}:{path[len(base) + 1:]}"
+        if normalized.startswith(base + "/"):
+            return f"{root['id']}:{normalized[len(base) + 1:]}"
     return None
 
 
@@ -52,13 +66,16 @@ def cmd_view(args):
     emit(current_view())
 
 
-def do_scan(force=False, probe_fn=None):
-    """Walk the mounted roots (outside the lock: it can take a minute), then fold the
-    result in under the lock: moved videos keep their progress."""
+def do_scan(force=False, probe_fn=None, web_ids=None, prefetch=None):
+    """Walk the mounted roots and read the web courses (outside the lock: both can take
+    a minute), then fold the result in under the lock: moved videos keep their progress."""
     config = store.load_config()
-    layouts = {k: v.get("layout") for k, v in store.load_library()["folders"].items()}
+    library = store.load_library()
+    layouts = {k: v.get("layout") for k, v in library["folders"].items()}
+    web_defs = {k: v for k, v in library["web"].items() if isinstance(v, dict)}
     old = store.load_scan()
-    new = scan.scan_all(config, layouts, old, probe_fn or probe.probe_duration, force)
+    new = scan.scan_all(config, layouts, old, probe_fn or probe.probe_duration, force,
+                        web_defs=web_defs, web_ids=web_ids, prefetch=prefetch)
     probed = new.pop("probed")
     online = [r["id"] for r in config["roots"] if os.path.isdir(r["path"])]
     moves = scan.find_moves(old, new, online)
@@ -83,6 +100,9 @@ def do_scan(force=False, probe_fn=None):
         "probed": probed,
         "errors": [{"id": l["id"], "error": files[l["id"]]["error"]}
                    for l in lessons if (files.get(l["id"]) or {}).get("error")],
+        "webErrors": [{"id": cid, "error": info["error"]}
+                      for cid, info in ((new["roots"].get("web") or {}).get("sources") or {}).items()
+                      if info.get("error")],
         "moved": len(moves),
     }
 
@@ -154,36 +174,108 @@ def cmd_apply(args):
     with store.transaction() as docs:
         result = ops.apply(docs, payload, cache)
     if result.pop("rescan", False):
-        result["scan"] = do_scan()
+        result["scan"] = do_scan(web_ids=result.pop("webIds", None))
     emit({"view": current_view(), "result": result})
+
+
+# --- web courses -------------------------------------------------------------
+
+def cmd_web_add(args):
+    """Read the link first, with no lock held, and only write once it answered."""
+    url = args.url.strip()
+    if not url.startswith(("http://", "https://")):
+        raise SyllabusError("Paste a link that starts with http", USAGE)
+    password = (args.password or "").strip()
+    answer = web.fetch_playlist(url, password)
+    if answer["error"]:
+        raise SyllabusError(answer["error"], OFFLINE)
+    if not answer["entries"]:
+        raise SyllabusError("That link has no video", USAGE)
+    source = {"kind": answer["kind"], "url": url if answer["kind"] == "playlist" else answer["entries"][0]["url"]}
+    if password:
+        source["password"] = password
+    course_id = (args.course or "").strip()
+    with store.transaction() as docs:
+        defs = docs.library["web"]
+        if course_id:
+            if course_id not in defs:
+                raise SyllabusError("Unknown web course", UNKNOWN)
+            if answer["kind"] != "video":
+                raise SyllabusError("A playlist makes a course of its own", USAGE)
+            if any(s.get("url") == source["url"] for s in defs[course_id].get("sources", [])):
+                raise SyllabusError("That video is already in the course", USAGE)
+            defs[course_id].setdefault("sources", []).append(source)
+        else:
+            course_id = web.new_course_id(set(defs))
+            defs[course_id] = {"sources": [source], "addedAt": store.now_iso()}
+        over = docs.library["courses"].setdefault(course_id, {})
+        if args.title:
+            over["title"] = args.title.strip()
+        if args.topic:
+            over["topic"] = args.topic.strip()
+    result = do_scan(web_ids={course_id}, prefetch={source["url"]: answer})
+    emit({"courseId": course_id, "title": answer["title"], "videos": len(answer["entries"]), "scan": result})
+
+
+def cmd_web_refresh(args):
+    """Read one web course again, or every one of them, right now."""
+    defs = store.load_library()["web"]
+    if args.course_id:
+        if args.course_id not in defs:
+            raise SyllabusError("Unknown web course", UNKNOWN)
+        ids = {args.course_id}
+    else:
+        ids = set(defs)
+    emit(do_scan(web_ids=ids))
 
 
 # --- playing -----------------------------------------------------------------
 
-def media_path(config, cache, lesson_id):
+def media_path(config, cache, state, lesson_id):
+    """Where the video is: a file under a root, a file that was downloaded, or a link.
+    Returns (target, course, kind) with kind "file" or "link"."""
     entry = scan.lesson_index(cache).get(lesson_id)
     if entry is None:
         raise SyllabusError("Unknown video", UNKNOWN)
     root_id, course, lesson = entry
+    if root_id == "web":
+        # Downloading a course is precisely what should survive the uploader taking a video
+        # down: a registered file that still exists plays, whatever "available" says.
+        saved = (state.get("downloads") or {}).get(lesson_id) or {}
+        if saved.get("path") and os.path.isfile(saved["path"]):
+            return saved["path"], course, "file"
+        if not lesson.get("available", True):
+            raise SyllabusError("That video is not available any more", OFFLINE)
+        if not lesson.get("url"):
+            raise SyllabusError("That video has no link any more", UNKNOWN)
+        return lesson["url"], course, "link"
     base = root_path(config, root_id)
     if not base or not os.path.isdir(base):
         raise SyllabusError("The course disk is not mounted", OFFLINE)
     path = os.path.join(base, lesson["relpath"])
     if not os.path.isfile(path):
         raise SyllabusError("That video is no longer on the disk; rescan the library", OFFLINE)
-    return path, course
+    return path, course, "file"
 
 
 def start_playing(lesson_id, at=None):
-    config, cache = store.load_config(), store.load_scan()
-    path, course = media_path(config, cache, lesson_id)
+    config, cache, state = store.load_config(), store.load_scan(), store.load_state()
+    target, course, kind = media_path(config, cache, state, lesson_id)
+    options = []
+    if kind == "link":
+        lesson = scan.lesson_index(cache)[lesson_id][2]
+        options = player.web_options(config, web.password_for(store.load_library()["web"], course["id"], lesson))
     if at is None:
-        at = progress.start_position(store.load_state()["lessons"].get(lesson_id), config["resumeRewind"])
+        at = progress.start_position(state["lessons"].get(lesson_id), config["resumeRewind"])
     at = max(0.0, float(at))
-    mode = player.play(config, path, at)
+    mode = player.play(config, target, at, options=options)
+    stale = kind == "link" and lesson_id in (state.get("downloads") or {})
     with store.transaction() as docs:
         docs.state["last"] = {"lessonId": lesson_id, "at": store.now_iso()}
-    return {"lessonId": lesson_id, "courseId": course["id"], "start": round(at, 3), "mode": mode}
+        if stale:
+            # The file was deleted behind our back: the registry would keep pointing at it.
+            docs.state["downloads"].pop(lesson_id, None)
+    return {"lessonId": lesson_id, "courseId": course["id"], "start": round(at, 3), "mode": mode, "kind": kind}
 
 
 def cmd_play(args):
@@ -239,6 +331,44 @@ def cmd_report(args):
         applied = progress.apply_report(docs.state, lesson_id, course_id, args.pos, args.duration, args.played,
                                         args.seq, args.eof, docs.config["seenThreshold"], keep_last=args.keep_last)
     emit({"lessonId": lesson_id, "applied": applied})
+
+
+def cmd_download(args):
+    """--run is the worker; without it the panel gets a detached one and returns at once."""
+    if args.stop:
+        emit({"courseId": args.course_id, "stopped": downloads.stop(args.course_id)})
+        return
+    if args.run:
+        summary = downloads.run(args.course_id)
+        if summary["failed"]:
+            notify(f"{summary['done']} of {summary['total']} downloaded, {len(summary['failed'])} failed: "
+                   + ", ".join(summary["failed"][:3]))
+        elif summary["total"]:
+            notify(f"{summary['done']} video{'' if summary['done'] == 1 else 's'} downloaded")
+        emit(summary)
+        return
+    config, cache = store.load_config(), store.load_scan()
+    library, state = store.load_library(), store.load_state()
+    if downloads.progress(args.course_id):
+        raise SyllabusError("That course is already downloading", USAGE)
+    _folder, items = downloads.plan(config, cache, library, state, args.course_id)
+    subprocess.Popen([paths.BIN_PATH, "download", args.course_id, "--run"], stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+                     close_fds=True)
+    emit({"courseId": args.course_id, "started": True, "pending": len(items)})
+
+
+def cmd_downloads_delete(args):
+    config = store.load_config()
+    cache = store.load_scan()
+    course = known_course(cache, args.course_id)
+    ids = [l["id"] for l in course["lessons"]]
+    # Stop a running worker before anything is deleted: left running, it would keep
+    # writing into the folder this command is about to empty.
+    downloads.stop(args.course_id)
+    with store.transaction() as docs:
+        result = downloads.delete_files(config, docs.state, ids)
+    emit({"courseId": args.course_id, **result})
 
 
 def cmd_bookmark_here(args):
@@ -307,6 +437,28 @@ def build_parser():
     p.add_argument("--keep-last", action="store_true",
                    help="mpv replaced this video with another: save it, but leave `last` alone")
     p.set_defaults(func=cmd_report)
+    down = sub.add_parser("download", help="download a web course to watch it offline")
+    down.add_argument("course_id")
+    down.add_argument("--run", action="store_true", help=argparse.SUPPRESS)
+    down.add_argument("--stop", action="store_true")
+    down.set_defaults(func=cmd_download)
+
+    wipe = sub.add_parser("downloads-delete", help="delete the files a web course downloaded")
+    wipe.add_argument("course_id")
+    wipe.set_defaults(func=cmd_downloads_delete)
+
+    add = sub.add_parser("web-add", help="add a playlist or a video from the web")
+    add.add_argument("url")
+    add.add_argument("--course", help="add a loose video to this web course")
+    add.add_argument("--title")
+    add.add_argument("--topic")
+    add.add_argument("--password", help="the video's password, if the site asks for one")
+    add.set_defaults(func=cmd_web_add)
+
+    refresh = sub.add_parser("web-refresh", help="read the web courses again now")
+    refresh.add_argument("course_id", nargs="?")
+    refresh.set_defaults(func=cmd_web_refresh)
+
     p = sub.add_parser("bookmark-here", help="bookmark a moment of a video (default: what mpv is playing)")
     p.add_argument("--text", default="")
     p.add_argument("--path")

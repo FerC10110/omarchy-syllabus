@@ -1,6 +1,7 @@
 """Turns the course folders on the disk into courses and lessons. It only reads
 the disk: durations come from probe.py, and everything the user decides lives
 in the library, never here."""
+import datetime
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -77,7 +78,7 @@ def auto_cover(folder_name, images):
 
 # --- walking -----------------------------------------------------------------
 
-def _entries(path):
+def _entries(path, skip=()):
     """(dirs, files) in natural order, without dotfiles. An unreadable folder is empty."""
     try:
         with os.scandir(path) as it:
@@ -93,6 +94,7 @@ def _entries(path):
                 files.append(entry)
         except OSError:
             continue
+    dirs = [d for d in dirs if os.path.realpath(d.path) not in skip]
     key = lambda e: natural_key(e.name)  # noqa: E731
     return sorted(dirs, key=key), sorted(files, key=key)
 
@@ -102,9 +104,9 @@ def _has_videos(path):
     return any(ext_of(f.name) in VIDEO_EXTS for f in files) or any(_has_videos(d.path) for d in dirs)
 
 
-def _collect(base, rel_dir, group, recursive, out):
+def _collect(base, rel_dir, group, recursive, out, skip=()):
     """Files of rel_dir first, then each subfolder; lessons in subfolders carry the subfolder as group."""
-    dirs, files = _entries(os.path.join(base, rel_dir))
+    dirs, files = _entries(os.path.join(base, rel_dir), skip)
     for f in files:
         rel = f"{rel_dir}/{f.name}"
         try:
@@ -121,12 +123,12 @@ def _collect(base, rel_dir, group, recursive, out):
             out["docs"].append({"relpath": rel, "name": f.name, "size": st.st_size, "ext": ext})
     if recursive:
         for d in dirs:
-            _collect(base, f"{rel_dir}/{d.name}", f"{group}/{d.name}" if group else d.name, True, out)
+            _collect(base, f"{rel_dir}/{d.name}", f"{group}/{d.name}" if group else d.name, True, out, skip)
 
 
-def build_course(root_id, root_path, rel_dir, folder_id, topic, root_images, recursive=True):
+def build_course(root_id, root_path, rel_dir, folder_id, topic, root_images, recursive=True, skip=()):
     out = {"lessons": [], "docs": [], "images": []}
-    _collect(root_path, rel_dir, "", recursive, out)
+    _collect(root_path, rel_dir, "", recursive, out, skip)
     title = course_title(os.path.basename(rel_dir))
     lessons = []
     for position, rec in enumerate(out["lessons"], 1):
@@ -137,14 +139,14 @@ def build_course(root_id, root_path, rel_dir, folder_id, topic, root_images, rec
             "autoCover": auto_cover(os.path.basename(rel_dir), root_images)}
 
 
-def walk_root(root_id, root_path, layouts):
+def walk_root(root_id, root_path, layouts, skip=()):
     """Courses under one root. `layouts` maps a top-level folder id to "course" or "collection"."""
-    dirs, files = _entries(root_path)
+    dirs, files = _entries(root_path, skip)
     images = [f.name for f in files if ext_of(f.name) in IMAGE_EXTS]
     courses, folders = [], {}
     for d in dirs:
         folder_id = f"{root_id}:{d.name}"
-        sub_dirs, sub_files = _entries(d.path)
+        sub_dirs, sub_files = _entries(d.path, skip)
         direct = any(ext_of(f.name) in VIDEO_EXTS for f in sub_files)
         with_videos = [s for s in sub_dirs if _has_videos(s.path)]
         if not direct and not with_videos:
@@ -156,12 +158,13 @@ def walk_root(root_id, root_path, layouts):
             layout = detected
         if layout == "collection":
             if direct:
-                courses.append(build_course(root_id, root_path, d.name, folder_id, "", images, recursive=False))
+                courses.append(build_course(root_id, root_path, d.name, folder_id, "", images,
+                                            recursive=False, skip=skip))
             for sub in with_videos:
                 courses.append(build_course(root_id, root_path, f"{d.name}/{sub.name}", folder_id,
-                                            course_title(d.name), images))
+                                            course_title(d.name), images, skip=skip))
         else:
-            courses.append(build_course(root_id, root_path, d.name, folder_id, "", images))
+            courses.append(build_course(root_id, root_path, d.name, folder_id, "", images, skip=skip))
     return {"courses": courses, "images": images, "folders": folders}
 
 
@@ -185,12 +188,37 @@ def _cached_ok(cached, lesson):
             and (cached.get("duration") or cached.get("error")))
 
 
-def scan_all(config, layouts, old, probe_fn, force=False, workers=4):
+def web_due(old_tree, defs, hours, force=False):
+    """The web courses whose last read is older than `hours` (all of them with force)."""
+    if force:
+        return set(defs)
+    sources = (old_tree or {}).get("sources") or {}
+    limit = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=max(1.0, float(hours)))
+    due = set()
+    for course_id in defs:
+        stamp = (sources.get(course_id) or {}).get("fetchedAt") or ""
+        try:
+            when = datetime.datetime.fromisoformat(stamp)
+        except ValueError:
+            due.add(course_id)
+            continue
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=datetime.timezone.utc)
+        if when <= limit:
+            due.add(course_id)
+    return due
+
+
+def scan_all(config, layouts, old, probe_fn, force=False, workers=4, web_defs=None, web_ids=None, build_web=None,
+             prefetch=None):
     """A new scan cache. Mounted roots are walked again and only new or changed videos
-    are probed (all of them with force); a root that is not mounted keeps its old tree."""
+    are probed (all of them with force); a root that is not mounted keeps its old tree.
+    The web courses due for a refresh are read too, and folded in beside the disk roots."""
     new = {"version": 1, "roots": {}, "files": {}}
     old_roots = old.get("roots") or {}
     old_files = old.get("files") or {}
+    downloads = ((config.get("web") or {}).get("downloadFolder") or "").strip()
+    skip = {os.path.realpath(downloads)} if downloads else set()
     todo = []
     for root in config["roots"]:
         root_id, root_path = root["id"], root["path"]
@@ -200,7 +228,7 @@ def scan_all(config, layouts, old, probe_fn, force=False, workers=4):
                 new["roots"][root_id] = old_roots[root_id]
             new["files"].update({k: v for k, v in old_files.items() if k.startswith(prefix)})
             continue
-        tree = walk_root(root_id, root_path, layouts)
+        tree = walk_root(root_id, root_path, layouts, skip)
         tree["path"] = root_path
         tree["scannedAt"] = store.now_iso()
         new["roots"][root_id] = tree
@@ -211,6 +239,27 @@ def scan_all(config, layouts, old, probe_fn, force=False, workers=4):
                     new["files"][lesson["id"]] = cached
                 else:
                     todo.append((lesson, os.path.join(root_path, lesson["relpath"])))
+
+    if web_defs:
+        # Imported here and not at the top: covers imports scan, so scan importing web
+        # at module level would close the circle.
+        from . import web
+        old_web = old_roots.get("web") or {}
+        hours = (config.get("web") or {}).get("refreshHours", 24)
+        due = web_due(old_web, web_defs, hours, force) | (set(web_ids or ()) & set(web_defs))
+        try:
+            tree = (build_web or web.build_tree)(web_defs, old_web, due, prefetch=prefetch)
+        except Exception as e:
+            # Whatever the web step hits, the disk scan that already ran is kept.
+            tree = dict(old_web) or {"courses": [], "images": [], "folders": {}, "sources": {}}
+            tree["error"] = f"Could not read the web courses: {e}"
+        new["roots"]["web"] = tree
+        for course in tree["courses"]:
+            for lesson in course["lessons"]:
+                if lesson.get("duration"):
+                    new["files"][lesson["id"]] = {"duration": round(float(lesson["duration"]), 3)}
+                elif lesson["id"] in old_files:
+                    new["files"][lesson["id"]] = old_files[lesson["id"]]
 
     def probe_one(item):
         lesson, path = item

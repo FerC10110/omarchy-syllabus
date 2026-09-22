@@ -58,6 +58,12 @@ Panel {
   property bool autoScanDue: false
   property var pendingConfirm: null
 
+  // Ops whose result can carry "rescan" or "webIds" (see ops.py): applying one can
+  // trigger a real read of the web courses, which is what scanEngine's longer budget is
+  // for and engine's 20 s is not — a Vimeo removal alone can fan out to several rounds
+  // of yt-dlp. Keep this in sync with ops.py; tests/test_panel.py checks that it is.
+  readonly property var rescanOps: ["folder.layout", "web.remove", "web.removeVideo"]
+
   function pluginPath(relative) {
     var url = String(Qt.resolvedUrl(relative))
     return url.indexOf("file://") === 0 ? decodeURIComponent(url.substring(7)) : url
@@ -113,7 +119,8 @@ Panel {
   // On error the notice shows the CLI's message, then onError (optional) gets
   // the error payload ({error, code, reason?}); onDone never runs then.
   function apply(op, onDone, onError) {
-    engine.call(["apply"], op, function(payload) {
+    var target = rescanOps.indexOf(op.op) >= 0 ? scanEngine : engine
+    target.call(["apply"], op, function(payload) {
       if (payload.error !== undefined) {
         syllabus.showNotice(payload.error, true)
         if (onError) onError(payload)
@@ -248,6 +255,52 @@ Panel {
     courseEdit.show(course)
   }
 
+  // Adding needs the network, so it is a command and not an apply: the CLI reads the
+  // link first and only then writes.
+  function webAdd(values, onDone) {
+    var args = ["web-add", values.url]
+    if (values.course) args = args.concat(["--course", values.course])
+    if (values.title) args = args.concat(["--title", values.title])
+    if (values.topic) args = args.concat(["--topic", values.topic])
+    if (values.password) args = args.concat(["--password", values.password])
+    scanEngine.call(args, undefined, function(payload) {
+      if (payload.error === undefined) {
+        if (payload.scan) syllabus.showScanResult(payload.scan)
+        syllabus.refresh()
+      }
+      if (onDone) onDone(payload)
+    })
+  }
+
+  function openWebAdd(courseId) { webAddDialog.show(courseId || "") }
+
+  function webRefresh(courseId) {
+    scanEngine.call(["web-refresh", courseId], undefined, function(payload) {
+      if (payload.error !== undefined) { syllabus.showNotice(payload.error, true); return }
+      syllabus.showScanResult(payload)
+      syllabus.refresh()
+    })
+  }
+
+  // The download runs detached: the panel only starts or stops it and watches
+  // state.json, which every finished video updates.
+  function download(courseId, stop) {
+    engine.call(stop ? ["download", courseId, "--stop"] : ["download", courseId], undefined, function(payload) {
+      if (payload.error !== undefined) { syllabus.showNotice(payload.error, true); return }
+      syllabus.showNotice(stop ? (payload.stopped ? "Download stopped" : "That download was not running")
+                                : "Downloading " + payload.pending + " videos", false)
+      syllabus.refresh()
+    })
+  }
+
+  function deleteDownloads(courseId) {
+    engine.call(["downloads-delete", courseId], undefined, function(payload) {
+      if (payload.error !== undefined) { syllabus.showNotice(payload.error, true); return }
+      syllabus.showNotice(payload.removed + " files deleted", false)
+      syllabus.refresh()
+    })
+  }
+
   // Clipboard via wl-copy with the text as its argument: no shell, no quoting.
   function copyText(text) {
     Quickshell.execDetached(["wl-copy", "--", String(text)])
@@ -354,6 +407,7 @@ Panel {
         event.accepted = true
         if (promptDialog.opened) promptDialog.cancel()
         else if (courseEdit.opened) courseEdit.cancel()
+        else if (webAddDialog.opened) { webAddDialog.cancel(); return }
         else syllabus.back()
       }
 
@@ -433,6 +487,14 @@ Panel {
 
       CourseEditDialog {
         id: courseEdit
+        anchors.fill: parent
+        z: 20
+        app: syllabus
+        onClosed: syllabus.focusKeys()
+      }
+
+      WebAddDialog {
+        id: webAddDialog
         anchors.fill: parent
         z: 20
         app: syllabus

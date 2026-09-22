@@ -49,6 +49,28 @@ class Config(TempHome):
         self.assertEqual(config["readily"], {"enabled": False, "section": "Cursos"})
         self.assertNotIn("unknown", config)
 
+    def test_web_defaults(self):
+        config = store.load_config()
+        self.assertEqual(config["web"]["quality"], "1080p")
+        self.assertEqual(config["web"]["refreshHours"], 24)
+        self.assertEqual(config["web"]["subtitleLanguages"], ["es", "en"])
+        self.assertIs(config["web"]["autoSubtitles"], True)
+        self.assertEqual(config["web"]["audioLanguage"], "")
+        self.assertEqual(config["web"]["downloadFolder"],
+                         os.path.join(os.path.expanduser("~"), "Videos", "Syllabus"))
+
+    def test_web_values_are_cleaned(self):
+        store.write_json(paths.config_path(), {"web": {"quality": "4k", "refreshHours": 900,
+                                                       "downloadFolder": "~/Bajados/",
+                                                       "subtitleLanguages": ["es", "", 7, "pt-BR"],
+                                                       "audioLanguage": "not a language"}})
+        web = store.load_config()["web"]
+        self.assertEqual(web["quality"], "1080p")
+        self.assertEqual(web["refreshHours"], 168)
+        self.assertEqual(web["downloadFolder"], os.path.join(os.path.expanduser("~"), "Bajados"))
+        self.assertEqual(web["subtitleLanguages"], ["es", "pt-BR"])
+        self.assertEqual(web["audioLanguage"], "")
+
 
 class Files(TempHome):
     def test_write_and_read_json(self):
@@ -140,6 +162,19 @@ class Dates(TempHome):
             self.assertEqual(store.local_day(moment), "2026-09-18")
         with local_tz("UTC"):
             self.assertEqual(store.local_day(moment), "2026-09-19")
+
+
+class WebDocuments(TempHome):
+    def test_library_and_state_start_with_the_web_tables(self):
+        self.assertEqual(store.load_library()["web"], {})
+        self.assertEqual(store.load_state()["downloads"], {})
+
+    def test_web_definitions_and_downloads_survive_a_reload(self):
+        store.write_json(paths.library_path(), {"web": {"web:7f3a21": {"sources": [], "addedAt": "x"}, "bad": 7}})
+        store.write_json(paths.state_path(), {"downloads": {"web:7f3a21/youtube:a": {"path": "/tmp/a.mkv"},
+                                                            "web:7f3a21/youtube:b": "junk"}})
+        self.assertEqual(list(store.load_library()["web"]), ["web:7f3a21"])
+        self.assertEqual(list(store.load_state()["downloads"]), ["web:7f3a21/youtube:a"])
 
 
 if __name__ == "__main__":

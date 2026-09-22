@@ -54,6 +54,63 @@ class Argv(TempHome):
             "--fs", "--", "/disk/a b.mp4"])
 
 
+class WebOptions(TempHome):
+    def setUp(self):
+        super().setUp()
+        self.config = store.load_config()
+
+    def options(self, **web):
+        self.config["web"].update(web)
+        return player.web_options(self.config)
+
+    def test_the_format_crosses_quality_with_the_audio_language(self):
+        self.assertEqual(player.format_selector({"quality": "720p", "audioLanguage": ""}),
+                         "bv*[height<=720]+ba/b[height<=720]")
+        self.assertEqual(player.format_selector({"quality": "1080p", "audioLanguage": "es"}),
+                         "bv*[height<=1080]+ba[language^=es]/bv*[height<=1080]+ba/b[height<=1080]")
+        self.assertEqual(player.format_selector({"quality": "best", "audioLanguage": ""}), "")
+        self.assertEqual(player.format_selector({"quality": "best", "audioLanguage": "pt"}),
+                         "bv*+ba[language^=pt]/b")
+
+    def test_subtitles_travel_in_the_raw_options(self):
+        options = dict(self.options(subtitleLanguages=["es", "en"], autoSubtitles=True))
+        self.assertEqual(options["slang"], "es,en")
+        self.assertEqual(options["ytdl-raw-options"], "sub-langs=%5%es,en,write-auto-subs=")
+        self.assertNotIn("sid", options)
+
+    def test_automatic_subtitles_can_be_left_out(self):
+        options = dict(self.options(subtitleLanguages=["es"], autoSubtitles=False))
+        self.assertEqual(options["ytdl-raw-options"], "sub-langs=es")
+
+    def test_no_subtitle_languages_means_none_are_shown(self):
+        options = dict(self.options(subtitleLanguages=[]))
+        self.assertEqual(options["sid"], "no")
+        self.assertNotIn("slang", options)
+        self.assertNotIn("ytdl-raw-options", options)
+
+    def test_the_password_joins_the_raw_options(self):
+        self.config["web"].update({"subtitleLanguages": ["es"], "autoSubtitles": False})
+        options = dict(player.web_options(self.config, password="abre,sésamo"))
+        self.assertEqual(options["ytdl-raw-options"], "sub-langs=es,video-password=%12%abre,sésamo")
+
+    def test_the_options_reach_the_command_line_and_the_socket(self):
+        options = player.web_options(self.config)
+        argv = player.build_argv(self.config, "https://www.youtube.com/watch?v=aaa", 12.0, "/tmp/s", options)
+        self.assertIn("--ytdl-format=bv*[height<=1080]+ba/b[height<=1080]", argv)
+        self.assertIn("--slang=es,en", argv)
+        self.assertIn("--ytdl-raw-options=sub-langs=%5%es,en,write-auto-subs=", argv)
+        self.assertEqual(argv[-2:], ["--", "https://www.youtube.com/watch?v=aaa"])
+        # mpv parses the loadfile string with the same escape, one level deeper.
+        self.assertEqual(player.file_options(12.0, options),
+                         "start=12.000,ytdl-format=bv*[height<=1080]+ba/b[height<=1080],slang=%5%es,en,"
+                         "ytdl-raw-options=%35%sub-langs=%5%es,en,write-auto-subs=")
+
+    def test_a_disk_video_gets_no_web_options(self):
+        argv = player.build_argv(self.config, "/disk/a.mkv", 0.0, "/tmp/s")
+        self.assertFalse([a for a in argv if a.startswith(("--ytdl-", "--slang", "--sid"))])
+        self.assertEqual(player.file_options(0.0, ()), "start=0.000")
+
+
 class Play(TempHome):
     def setUp(self):
         super().setUp()
@@ -116,6 +173,16 @@ class Play(TempHome):
         with self.assertRaises(SyllabusError) as caught:
             player.current()
         self.assertEqual(caught.exception.code, 5)
+
+    def test_loadfile_carries_the_web_options(self):
+        fake = FakeMpv(paths.socket_path())
+        self.addCleanup(fake.stop)
+        config = store.load_config()
+        options = player.web_options(config)
+        player.play(config, "https://www.youtube.com/watch?v=aaa", 30.0, options=options)
+        command = fake.commands[-1]
+        self.assertEqual(command[:4], ["loadfile", "https://www.youtube.com/watch?v=aaa", "replace", -1])
+        self.assertTrue(command[4].startswith("start=30.000,ytdl-format="))
 
 
 if __name__ == "__main__":

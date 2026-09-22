@@ -7,7 +7,8 @@ const source = fs.readFileSync(path.join(__dirname, "..", "SyllabusModel.js"), "
 const M = new Function(source + `
 return { ICON, icon, fmtClock, fmtDuration, fmtStudy, fmtWhen, parseTimestamp, fraction, lessonStatus, isUrl,
          fold, filterCourses, groupByTopic, topicCounts, visibleLessons, hiddenCount, showGroup, daysLabel,
-         initials, fmtBytes, preview, progressLabel, courseOptions, linkText, splitArgs, nextCourse }`)()
+         initials, fmtBytes, preview, progressLabel, courseOptions, linkText, splitArgs, nextCourse,
+         fmtAgo, webSourceLine, splitLangs }`)()
 
 test("icons are single glyphs", () => {
   assert.equal(M.icon("play"), String.fromCodePoint(0xF040A))
@@ -108,4 +109,32 @@ test("nextCourse skips finished and missing courses", () => {
   assert.equal(M.nextCourse({ stages: [{ courseIds: ["a"] }, { courseIds: ["zz", "b", "c"] }] }, map), "b")
   assert.equal(M.nextCourse({ stages: [{ courseIds: ["a"] }] }, map), "")
   assert.equal(M.nextCourse(null, map), "")
+})
+
+test("fmtAgo reads as a person would say it", () => {
+  const now = Date.now()
+  assert.equal(M.fmtAgo(new Date(now - 30 * 1000).toISOString()), "just now")
+  assert.equal(M.fmtAgo(new Date(now - 90 * 60 * 1000).toISOString()), "1 h ago")
+  assert.equal(M.fmtAgo(new Date(now - 26 * 3600 * 1000).toISOString()), "yesterday")
+  assert.equal(M.fmtAgo(new Date(now - 5 * 24 * 3600 * 1000).toISOString()), "5 days ago")
+  assert.equal(M.fmtAgo(""), "")
+})
+
+test("splitLangs reads a comma-separated list", () => {
+  assert.deepEqual(M.splitLangs(" es , en "), ["es", "en"])
+  assert.deepEqual(M.splitLangs(""), [])
+  assert.deepEqual(M.splitLangs("es,,"), ["es"])
+})
+
+test("the source line says where a web course came from", () => {
+  const fresh = new Date(Date.now() - 2 * 3600 * 1000).toISOString()
+  assert.equal(M.webSourceLine({ web: { kind: "playlist", videoCount: 24, goneCount: 0, fetchedAt: fresh } }),
+               "YouTube playlist · 24 videos · updated 2 h ago")
+  assert.equal(M.webSourceLine({ web: { kind: "video", videoCount: 1, goneCount: 0, fetchedAt: fresh,
+                                        url: "https://vimeo.com/1" } }),
+               "Vimeo · 1 video · updated 2 h ago")
+  assert.equal(M.webSourceLine({ web: { kind: "playlist", videoCount: 3, goneCount: 1, fetchedAt: fresh } }),
+               "YouTube playlist · 3 videos · 1 not available · updated 2 h ago")
+  assert.equal(M.webSourceLine({ web: { error: "no internet" } }), "Couldn't refresh: no internet")
+  assert.equal(M.webSourceLine({ web: null }), "")
 })

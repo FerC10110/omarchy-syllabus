@@ -41,6 +41,14 @@ Rectangle {
     }
 
     Text {
+      visible: card.course.web !== null && card.course.web !== undefined
+      text: Model.icon("web")
+      color: Color.muted
+      font.family: Style.font.family
+      font.pixelSize: Style.font.caption
+    }
+
+    Text {
       Layout.fillWidth: true
       text: card.course.title
       wrapMode: Text.Wrap
