@@ -19,7 +19,7 @@ class Downloads(TempHome):
     def setUp(self):
         super().setUp()
         self.answers = install_fake_ytdlp(self.tmp)
-        self.folder = os.path.join(self.tmp, "Bajados")
+        self.folder = os.path.join(self.tmp, "Downloads")
         store.write_json(paths.config_path(), {"roots": [], "web": {"downloadFolder": self.folder,
                                                                     "quality": "720p",
                                                                     "subtitleLanguages": ["es", "en"],

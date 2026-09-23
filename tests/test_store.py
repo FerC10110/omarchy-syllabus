@@ -61,13 +61,13 @@ class Config(TempHome):
 
     def test_web_values_are_cleaned(self):
         store.write_json(paths.config_path(), {"web": {"quality": "4k", "refreshHours": 900,
-                                                       "downloadFolder": "~/Bajados/",
+                                                       "downloadFolder": "~/Downloads/",
                                                        "subtitleLanguages": ["es", "", 7, "pt-BR"],
                                                        "audioLanguage": "not a language"}})
         web = store.load_config()["web"]
         self.assertEqual(web["quality"], "1080p")
         self.assertEqual(web["refreshHours"], 168)
-        self.assertEqual(web["downloadFolder"], os.path.join(os.path.expanduser("~"), "Bajados"))
+        self.assertEqual(web["downloadFolder"], os.path.join(os.path.expanduser("~"), "Downloads"))
         self.assertEqual(web["subtitleLanguages"], ["es", "pt-BR"])
         self.assertEqual(web["audioLanguage"], "")
 

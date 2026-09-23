@@ -340,14 +340,14 @@ class WebConfig(OpsCase):
         self.apply(op="config.set", key="web.subtitleLanguages", value=["pt", "en"])
         self.apply(op="config.set", key="web.autoSubtitles", value=False)
         self.apply(op="config.set", key="web.audioLanguage", value="es")
-        self.apply(op="config.set", key="web.downloadFolder", value=os.path.join(self.tmp, "bajados"))
+        self.apply(op="config.set", key="web.downloadFolder", value=os.path.join(self.tmp, "downloads"))
         web = store.load_config()["web"]
         self.assertEqual(web["quality"], "720p")
         self.assertEqual(web["refreshHours"], 6)
         self.assertEqual(web["subtitleLanguages"], ["pt", "en"])
         self.assertIs(web["autoSubtitles"], False)
         self.assertEqual(web["audioLanguage"], "es")
-        self.assertEqual(web["downloadFolder"], os.path.join(self.tmp, "bajados"))
+        self.assertEqual(web["downloadFolder"], os.path.join(self.tmp, "downloads"))
 
     def test_an_empty_audio_language_means_the_original(self):
         self.apply(op="config.set", key="web.audioLanguage", value="es")
@@ -368,7 +368,7 @@ class WebConfig(OpsCase):
         self.fails(USAGE, op="config.set", key="web.subtitleLanguages", value=["español"])
         self.fails(USAGE, op="config.set", key="web.audioLanguage", value="castellano")
         self.fails(USAGE, op="config.set", key="web.refreshHours", value=0)
-        self.fails(USAGE, op="config.set", key="web.downloadFolder", value="bajados")
+        self.fails(USAGE, op="config.set", key="web.downloadFolder", value="downloads")
 
 
 class WebOps(OpsCase):
@@ -376,7 +376,7 @@ class WebOps(OpsCase):
         super().setUp()
         self.course_id = "web:7f3a21"
         self.other_id = "web:999999"
-        self.downloads_dir = os.path.join(self.tmp, "bajados")
+        self.downloads_dir = os.path.join(self.tmp, "downloads")
         os.makedirs(self.downloads_dir)
         store.write_json(paths.config_path(), {"roots": [{"id": "main", "path": self.root}],
                                                 "web": {"downloadFolder": self.downloads_dir}})

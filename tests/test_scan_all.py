@@ -156,7 +156,7 @@ class WebRoot(TempHome):
         self.root = os.path.join(self.tmp, "cursos")
         make_tree(self.root, {"A/1_a.mp4": 600})
         store.write_json(paths.config_path(), {"roots": [{"id": "main", "path": self.root}],
-                                               "web": {"downloadFolder": os.path.join(self.root, "Bajados")}})
+                                               "web": {"downloadFolder": os.path.join(self.root, "Downloads")}})
         self.config = store.load_config()
 
     def fake_tree(self, courses=("web:7f3a21",)):
@@ -190,24 +190,24 @@ class WebRoot(TempHome):
         self.assertEqual(ytdlp_calls(self.answers), [])
 
     def test_the_download_folder_is_not_scanned_as_a_course(self):
-        make_tree(self.root, {"Bajados/Curso web/01 - uno [youtube-aaa].mkv": 300})
+        make_tree(self.root, {"Downloads/A web course/01 - one [youtube-aaa].mkv": 300})
         cache = self.scan({})
         titles = [c["title"] for c in cache["roots"]["main"]["courses"]]
-        self.assertNotIn("Bajados", titles)
+        self.assertNotIn("Downloads", titles)
         self.assertEqual(titles, ["A"])
 
     def test_a_download_folder_nested_under_a_course_root_is_not_scanned_either(self):
-        make_tree(self.root, {"Mercados/cursoTrading/1_uno.mp4": 300,
-                              "Mercados/Bajados/Curso web/01 - uno [youtube-aaa].mkv": 300})
+        make_tree(self.root, {"Topic/Inner course/1_one.mp4": 300,
+                              "Topic/Downloads/A web course/01 - one [youtube-aaa].mkv": 300})
         store.write_json(paths.config_path(),
                          {"roots": [{"id": "main", "path": self.root}],
-                          "web": {"downloadFolder": os.path.join(self.root, "Mercados", "Bajados")}})
+                          "web": {"downloadFolder": os.path.join(self.root, "Topic", "Downloads")}})
         self.config = store.load_config()
         cache = self.scan({})
         courses = cache["roots"]["main"]["courses"]
-        self.assertNotIn("Bajados", [c["title"] for c in courses])
+        self.assertNotIn("Downloads", [c["title"] for c in courses])
         paths_seen = [l["relpath"] for c in courses for l in c["lessons"]]
-        self.assertTrue(all("Bajados" not in p for p in paths_seen), paths_seen)
+        self.assertTrue(all("Downloads" not in p for p in paths_seen), paths_seen)
 
     def test_only_the_courses_that_are_due_are_read_again(self):
         old = self.scan({"web:7f3a21": {"sources": [], "addedAt": ""}})

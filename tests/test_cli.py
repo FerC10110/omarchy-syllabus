@@ -295,11 +295,11 @@ class WebPlayback(TempHome):
     def test_a_downloaded_file_inside_a_root_resolves_to_its_web_lesson_not_the_root(self):
         # web.downloadFolder can sit inside a scanned root (the scan skips it on purpose);
         # state["downloads"] must be checked before the root prefixes, or the file resolves
-        # to a phantom "main:Bajados/..." lesson that owns no progress and no study time.
+        # to a phantom "main:Downloads/..." lesson that owns no progress and no study time.
         root = os.path.join(self.tmp, "cursos")
-        os.makedirs(os.path.join(root, "Bajados"), exist_ok=True)
+        os.makedirs(os.path.join(root, "Downloads"), exist_ok=True)
         self.config["roots"] = [{"id": "main", "path": root}]
-        path = os.path.join(root, "Bajados", "one.mkv")
+        path = os.path.join(root, "Downloads", "one.mkv")
         open(path, "w").close()
         self.state["downloads"] = {self.lesson["id"]: {"path": path, "size": 1, "at": ""}}
         self.assertEqual(cli.lesson_for_path(self.config, path, self.cache, self.state), self.lesson["id"])
@@ -315,7 +315,7 @@ class Downloads(TempHome):
     def setUp(self):
         super().setUp()
         self.answers = install_fake_ytdlp(self.tmp)
-        self.folder = os.path.join(self.tmp, "Bajados")
+        self.folder = os.path.join(self.tmp, "Downloads")
         store.write_json(paths.config_path(), {"roots": [], "web": {"downloadFolder": self.folder}})
         self.course_id = "web:7f3a21"
         self.lessons = [web_lesson(self.course_id, "aaa", "Uno"), web_lesson(self.course_id, "bbb", "Dos")]
