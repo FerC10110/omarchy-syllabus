@@ -354,6 +354,14 @@ class WebConfig(OpsCase):
         self.apply(op="config.set", key="web.audioLanguage", value="")
         self.assertEqual(store.load_config()["web"]["audioLanguage"], "")
 
+    def test_one_bad_subtitle_language_does_not_throw_away_the_good_ones(self):
+        self.apply(op="config.set", key="web.subtitleLanguages", value=["es", "english", "en"])
+        self.assertEqual(store.load_config()["web"]["subtitleLanguages"], ["es", "en"])
+
+    def test_no_subtitle_language_means_no_subtitles(self):
+        self.apply(op="config.set", key="web.subtitleLanguages", value=[])
+        self.assertEqual(store.load_config()["web"]["subtitleLanguages"], [])
+
     def test_bad_web_values_are_refused(self):
         from syllabus.errors import USAGE
         self.fails(USAGE, op="config.set", key="web.quality", value="4k")

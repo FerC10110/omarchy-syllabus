@@ -610,8 +610,15 @@ def op_config_set(docs, ctx, p):
         if not os.path.isabs(value):
             raise SyllabusError("The download folder must be an absolute path", USAGE)
     elif kind == "langs":
-        value = p.get("value")
-        if not isinstance(value, list) or not all(isinstance(v, str) and store.LANG_RE.match(v) for v in value):
+        raw = p.get("value")
+        if not isinstance(raw, list):
+            raise SyllabusError("Subtitle languages are codes like es or en", USAGE)
+        # One typo does not throw away the rest of the list: what reads as a code is
+        # kept, and the field shows what was saved. Only a list where nothing at all
+        # was a code is refused, because dropping every entry would silently turn the
+        # subtitles off.
+        value = [v for v in raw if isinstance(v, str) and store.LANG_RE.match(v)]
+        if raw and not value:
             raise SyllabusError("Subtitle languages are codes like es or en", USAGE)
     elif kind == "lang":
         value = _str(p, "value") or ""

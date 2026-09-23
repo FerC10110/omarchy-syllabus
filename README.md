@@ -85,7 +85,7 @@ your disk:
 
 | Setting | Default | What it does |
 |---|---|---|
-| Subtitle languages | `es, en` | Which subtitles to ask for; the first one you have is shown. Empty means none |
+| Subtitle languages | `es, en` | Which subtitles to ask for; the first one you have is shown. An entry that is not a code is dropped and the rest are kept; empty means none |
 | Include automatic subtitles | on | YouTube's machine-made captions, when a video has no written ones |
 | Audio language | empty | A code like `es` picks YouTube's dubbed audio; empty keeps the video's own |
 
