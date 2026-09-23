@@ -68,6 +68,8 @@ Free courses live on YouTube and Vimeo too. **Add from the web**, next to Rescan
 takes a playlist, a Vimeo showcase or a single video and makes it a course like any
 other: same progress, bookmarks, tasks, links, notes and roadmaps.
 
+![A course made from a YouTube playlist, with part of it already downloaded and one video taken down](screenshots/web.png)
+
 - Videos stream by default. **Download** keeps a whole course in
   `~/Videos/Syllabus`, and then it plays from there, with no internet.
 - Playlists are read again once a day and with **Rescan**. A video that is taken
