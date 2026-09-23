@@ -272,9 +272,17 @@ Every command prints JSON and takes `-h`; course and video IDs are in
   file.
 - mpv gets file names through its control socket as JSON, never through a shell.
 - The only thing that leaves your machine is a request for a web course you
-  added yourself: yt-dlp reads its page, Syllabus fetches its thumbnail over an
-  ordinary web request, and mpv streams or downloads its videos. No account, no
-  cookies, nothing else is sent anywhere.
+  added yourself: yt-dlp reads its page, Syllabus fetches its thumbnail, and mpv
+  streams or downloads its videos. No account, no cookies, nothing else is sent
+  anywhere.
+- A course password is never put on a command line, where any other program on
+  the machine could read it. yt-dlp is told about it on its standard input, and
+  mpv through a file that has no name and disappears when it closes.
+- A course page is not trusted to behave: what it sends back is read up to a
+  ceiling and no further, a playlist past 1000 videos is cut off and says so,
+  and the thumbnail is fetched only over https, only from an address out on the
+  internet — never one on your own machine or network, redirects included — and
+  only when it turns out to be an image of a sensible size.
 
 ## Remove
 

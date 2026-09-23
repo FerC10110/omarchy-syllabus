@@ -56,7 +56,9 @@ def ytdlp_args(config, url, template, password=""):
         if web_config.get("autoSubtitles"):
             args.append("--write-auto-subs")
     if password:
-        args += ["--video-password", password]
+        # Not on the command line: the password is written to yt-dlp's stdin instead,
+        # where no other process can read it. See web.password_config.
+        args = ["--config-locations", "-"] + args
     return args + [url]
 
 
@@ -101,7 +103,8 @@ def _register(lesson_id, path):
 def _download(config, item, spawn):
     args = [web.ytdlp_bin()] + ytdlp_args(config, item["url"], item["template"], item["password"])
     try:
-        done = spawn(args, capture_output=True, text=True)
+        done = spawn(args, capture_output=True, text=True,
+                     input=web.password_config(item["password"]))
     except (OSError, subprocess.SubprocessError):
         return ""
     if done.returncode != 0:
@@ -109,7 +112,7 @@ def _download(config, item, spawn):
     return existing_file(os.path.dirname(item["template"]), item["stem"])
 
 
-def run(course_id, spawn=subprocess.run):
+def run(course_id, spawn=web.run_capped):
     """Download what the course is missing, one video at a time. Every finished video is
     registered right away, so the panel sees the progress through state.json."""
     config, cache = store.load_config(), store.load_scan()

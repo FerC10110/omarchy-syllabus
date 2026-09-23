@@ -5,7 +5,7 @@ import subprocess
 import unittest
 from unittest import mock
 
-from support import TempHome, install_fake_ytdlp, ytdlp_answer, ytdlp_calls
+from support import TempHome, install_fake_ytdlp, ytdlp_answer, ytdlp_calls, ytdlp_stdins
 from syllabus import downloads, paths, store
 
 
@@ -38,6 +38,20 @@ class Downloads(TempHome):
         store.save_library(library)
         for lesson in self.lessons:
             ytdlp_answer(self.answers, lesson["url"], {"__file__": "video", "__ext__": "mkv"})
+
+    def test_the_password_of_a_course_never_reaches_the_command_line(self):
+        library = store.load_library()
+        library["web"][self.course_id]["sources"] = [{"kind": "playlist", "url": "https://p",
+                                                      "password": "abre sésamo"}]
+        store.save_library(library)
+        downloads.run(self.course_id)
+        calls = ytdlp_calls(self.answers)
+        self.assertTrue(calls)
+        for call in calls:
+            self.assertNotIn("--video-password", call)
+            self.assertFalse([a for a in call if "sésamo" in a], call)
+            self.assertEqual(call[:2], ["--config-locations", "-"])
+        self.assertEqual(ytdlp_stdins(self.answers)[0], "--video-password 'abre sésamo'\n")
 
     def test_names_are_safe_and_numbered(self):
         self.assertEqual(downloads.file_stem(1, self.lessons[0]), "01 - Uno: la barra [youtube-aaa]")

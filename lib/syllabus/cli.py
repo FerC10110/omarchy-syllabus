@@ -261,14 +261,15 @@ def media_path(config, cache, state, lesson_id):
 def start_playing(lesson_id, at=None):
     config, cache, state = store.load_config(), store.load_scan(), store.load_state()
     target, course, kind = media_path(config, cache, state, lesson_id)
-    options = []
+    options, secret = [], []
     if kind == "link":
         lesson = scan.lesson_index(cache)[lesson_id][2]
-        options = player.web_options(config, web.password_for(store.load_library()["web"], course["id"], lesson))
+        options, secret = player.web_options(
+            config, web.password_for(store.load_library()["web"], course["id"], lesson))
     if at is None:
         at = progress.start_position(state["lessons"].get(lesson_id), config["resumeRewind"])
     at = max(0.0, float(at))
-    mode = player.play(config, target, at, options=options)
+    mode = player.play(config, target, at, options=options, secret=secret)
     stale = kind == "link" and lesson_id in (state.get("downloads") or {})
     with store.transaction() as docs:
         docs.state["last"] = {"lessonId": lesson_id, "at": store.now_iso()}

@@ -61,7 +61,7 @@ class WebOptions(TempHome):
 
     def options(self, **web):
         self.config["web"].update(web)
-        return player.web_options(self.config)
+        return player.web_options(self.config)[0]
 
     def test_the_format_crosses_quality_with_the_audio_language(self):
         self.assertEqual(player.format_selector({"quality": "720p", "audioLanguage": ""}),
@@ -88,13 +88,38 @@ class WebOptions(TempHome):
         self.assertNotIn("slang", options)
         self.assertNotIn("ytdl-raw-options", options)
 
-    def test_the_password_joins_the_raw_options(self):
+    def test_the_password_never_travels_with_the_plain_options(self):
         self.config["web"].update({"subtitleLanguages": ["es"], "autoSubtitles": False})
-        options = dict(player.web_options(self.config, password="abre,sésamo"))
-        self.assertEqual(options["ytdl-raw-options"], "sub-langs=es,video-password=%12%abre,sésamo")
+        options, secret = player.web_options(self.config, password="abre,sésamo")
+        self.assertEqual(dict(options)["ytdl-raw-options"], "sub-langs=es")
+        self.assertEqual(secret, ["video-password=%12%abre,sésamo"])
+        # The socket is this session's own; there the password may ride along.
+        self.assertEqual(dict(player.with_secret(options, secret))["ytdl-raw-options"],
+                         "sub-langs=es,video-password=%12%abre,sésamo")
+
+    def test_the_password_reaches_mpv_through_a_file_no_one_can_open(self):
+        _, secret = player.web_options(self.config, password="abre,sésamo")
+        fd = player.secret_include(secret)
+        self.addCleanup(os.close, fd)
+        argv = player.build_argv(self.config, "https://vimeo.com/1", 0.0, "/tmp/s",
+                                 player.web_options(self.config)[0], fd)
+        self.assertFalse([a for a in argv if "sésamo" in a], argv)
+        self.assertIn(f"--include=/dev/fd/{fd}", argv)
+        # After the plain options, or the append would be overwritten by them.
+        self.assertGreater(argv.index(f"--include=/dev/fd/{fd}"),
+                           max(i for i, a in enumerate(argv) if a.startswith("--ytdl-raw-options=")))
+        self.assertEqual(os.read(fd, 4096).decode("utf-8"),
+                         "ytdl-raw-options-append=%31%video-password=%12%abre,sésamo\n")
+
+    def test_without_a_password_there_is_no_extra_file(self):
+        options, secret = player.web_options(self.config)
+        self.assertEqual(secret, [])
+        self.assertIsNone(player.secret_include(secret))
+        self.assertFalse([a for a in player.build_argv(self.config, "/a.mkv", 0.0, "/tmp/s", options)
+                          if a.startswith("--include=")])
 
     def test_the_options_reach_the_command_line_and_the_socket(self):
-        options = player.web_options(self.config)
+        options, _ = player.web_options(self.config)
         argv = player.build_argv(self.config, "https://www.youtube.com/watch?v=aaa", 12.0, "/tmp/s", options)
         self.assertIn("--ytdl-format=bv*[height<=1080]+ba/b[height<=1080]", argv)
         self.assertIn("--slang=es,en", argv)
@@ -178,11 +203,13 @@ class Play(TempHome):
         fake = FakeMpv(paths.socket_path())
         self.addCleanup(fake.stop)
         config = store.load_config()
-        options = player.web_options(config)
-        player.play(config, "https://www.youtube.com/watch?v=aaa", 30.0, options=options)
+        options, secret = player.web_options(config, password="abre,sésamo")
+        player.play(config, "https://www.youtube.com/watch?v=aaa", 30.0, options=options, secret=secret)
         command = fake.commands[-1]
         self.assertEqual(command[:4], ["loadfile", "https://www.youtube.com/watch?v=aaa", "replace", -1])
         self.assertTrue(command[4].startswith("start=30.000,ytdl-format="))
+        # mpv is already running: the options go over its socket, not a command line.
+        self.assertIn("video-password=%12%abre,sésamo", command[4])
 
 
 if __name__ == "__main__":

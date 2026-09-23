@@ -110,8 +110,11 @@ import hashlib, json, os, sys
 args = sys.argv[1:]
 folder = os.environ["SYLLABUS_FAKE_YTDLP"]
 url = args[-1]
+config = sys.stdin.read() if "--config-locations" in args else ""
 with open(os.path.join(folder, "calls.log"), "a", encoding="utf-8") as log:
     log.write(json.dumps(args) + "\\n")
+with open(os.path.join(folder, "stdin.log"), "a", encoding="utf-8") as log:
+    log.write(json.dumps(config) + "\\n")
 path = os.path.join(folder, hashlib.sha1(url.encode("utf-8")).hexdigest()[:16] + ".json")
 if not os.path.exists(path):
     print("ERROR: [generic] Unable to download webpage: <urlopen error>", file=sys.stderr)
@@ -121,6 +124,11 @@ with open(path, encoding="utf-8") as f:
 if "__error__" in data:
     print(data["__error__"], file=sys.stderr)
     sys.exit(1)
+if "__flood__" in data:
+    chunk = "x" * (1 << 16)
+    while True:
+        sys.stdout.write(chunk)
+        sys.stdout.flush()
 if "__file__" in data:
     template = args[args.index("-o") + 1]
     target = template.replace("%(ext)s", data.get("__ext__", "mkv"))
@@ -149,6 +157,15 @@ def ytdlp_answer(folder, url, data):
     name = hashlib.sha1(url.encode("utf-8")).hexdigest()[:16] + ".json"
     with open(os.path.join(folder, name), "w", encoding="utf-8") as f:
         json.dump(data, f)
+
+
+def ytdlp_stdins(folder):
+    """What each call read on stdin: where a password travels now."""
+    path = os.path.join(folder, "stdin.log")
+    if not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
 
 
 def ytdlp_calls(folder):

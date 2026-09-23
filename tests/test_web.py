@@ -1,7 +1,9 @@
 import os
+import struct
 import unittest
+from unittest import mock
 
-from support import PLUGIN, TempHome, install_fake_ytdlp, ytdlp_answer, ytdlp_calls
+from support import PLUGIN, TempHome, install_fake_ytdlp, ytdlp_answer, ytdlp_calls, ytdlp_stdins
 from syllabus import covers, paths, web
 
 PLAYLIST_URL = "https://www.youtube.com/playlist?list=PLfake"
@@ -49,13 +51,28 @@ class Reading(TempHome):
         self.assertEqual(answer["entries"][0]["url"], "https://vimeo.com/123456789")
         self.assertEqual(answer["entries"][0]["site"], "vimeo")
 
-    def test_a_password_is_passed_on(self):
+    def test_a_password_reaches_yt_dlp_without_touching_the_command_line(self):
         url = "https://vimeo.com/999"
         ytdlp_answer(self.answers, url, {"id": "999", "ie_key": "Vimeo", "title": "Privada", "duration": 60})
         web.fetch_video(url, password="abre-sésamo")
         call = ytdlp_calls(self.answers)[0]
-        self.assertIn("--video-password", call)
-        self.assertEqual(call[call.index("--video-password") + 1], "abre-sésamo")
+        # /proc/<pid>/cmdline is readable by anyone on the machine; stdin is not.
+        self.assertNotIn("--video-password", call)
+        self.assertFalse([a for a in call if "sésamo" in a], call)
+        self.assertEqual(call[:2], ["--config-locations", "-"])
+        self.assertEqual(ytdlp_stdins(self.answers)[0], "--video-password 'abre-sésamo'\n")
+
+    def test_a_password_with_spaces_survives_the_config_quoting(self):
+        url = "https://vimeo.com/998"
+        ytdlp_answer(self.answers, url, {"id": "998", "ie_key": "Vimeo", "title": "Privada", "duration": 60})
+        web.fetch_video(url, password="abre sésamo #1")
+        self.assertEqual(ytdlp_stdins(self.answers)[0], "--video-password 'abre sésamo #1'\n")
+
+    def test_a_link_without_a_password_is_told_nothing(self):
+        url = "https://vimeo.com/997"
+        ytdlp_answer(self.answers, url, {"id": "997", "ie_key": "Vimeo", "title": "Abierta", "duration": 60})
+        web.fetch_video(url)
+        self.assertNotIn("--config-locations", ytdlp_calls(self.answers)[0])
 
     def test_a_network_failure_is_data_not_an_exception(self):
         url = "https://www.youtube.com/playlist?list=PLdown"
@@ -227,64 +244,192 @@ class Tree(TempHome):
         self.assertEqual(len(lessons), 3)
 
 
+class Ceilings(TempHome):
+    """What comes back from a link is bounded, whatever the other side decides to send."""
+
+    def setUp(self):
+        super().setUp()
+        self.answers = install_fake_ytdlp(self.tmp)
+
+    def test_a_link_that_never_stops_printing_is_cut_off_and_killed(self):
+        url = "https://vimeo.com/flood"
+        ytdlp_answer(self.answers, url, {"__flood__": True})
+        answer = web.fetch_video(url)
+        self.assertEqual(answer["error"], "That link sent back far too much")
+        self.assertEqual(answer["entries"], [])
+
+    def test_a_playlist_past_the_ceiling_keeps_what_fits_and_says_so(self):
+        url = "https://www.youtube.com/playlist?list=PLhuge"
+        entries = [{"id": f"v{n}", "ie_key": "Youtube", "title": f"Clase {n}", "duration": 60}
+                   for n in range(10)]
+        ytdlp_answer(self.answers, url, {"_type": "playlist", "title": "Enorme", "entries": entries})
+        with mock.patch.object(web, "MAX_ENTRIES", 3):
+            answer = web.fetch_playlist(url)
+        self.assertEqual(len(answer["entries"]), 3)
+        self.assertEqual(answer["dropped"], 7)
+        self.assertEqual([e["videoId"] for e in answer["entries"]], ["v0", "v1", "v2"])
+
+    def test_a_truncated_playlist_tells_the_user_on_the_course(self):
+        url = "https://www.youtube.com/playlist?list=PLhuge2"
+        entries = [{"id": f"v{n}", "ie_key": "Youtube", "title": f"Clase {n}", "duration": 60}
+                   for n in range(6)]
+        ytdlp_answer(self.answers, url, {"_type": "playlist", "title": "Enorme", "entries": entries})
+        defs = {"web:aaaaaa": {"sources": [{"kind": "playlist", "url": url}], "addedAt": ""}}
+        with mock.patch.object(web, "MAX_ENTRIES", 2):
+            tree = web.build_tree(defs, {}, {"web:aaaaaa"}, cover=lambda t: "")
+        self.assertIn("more than 2 videos", tree["sources"]["web:aaaaaa"]["error"])
+        self.assertEqual(len(tree["courses"][0]["lessons"]), 2)
+
+    def test_a_field_is_never_longer_than_its_ceiling(self):
+        url = "https://vimeo.com/long"
+        ytdlp_answer(self.answers, url, {"id": "9" * 5000, "ie_key": "V" * 5000,
+                                         "title": "t" * 5000, "webpage_url": "https://x/" + "u" * 9000,
+                                         "duration": 60})
+        entry = web.fetch_video(url)["entries"][0]
+        self.assertEqual(len(entry["videoId"]), web.MAX_TEXT)
+        self.assertEqual(len(entry["title"]), web.MAX_TEXT)
+        self.assertLessEqual(len(entry["url"]), web.MAX_URL)
+        self.assertLessEqual(len(entry["site"]), 40)
+
+    def test_one_scan_only_looks_up_so_many_durations(self):
+        asked = []
+
+        def fetch(url, password=""):
+            asked.append(url)
+            return {"kind": "video", "title": "", "thumbnail": "", "entries": [], "error": "", "dropped": 0}
+
+        entries = [{"site": "youtube", "videoId": f"v{n}", "url": f"https://www.youtube.com/watch?v=v{n}",
+                    "title": "t", "duration": 0.0, "available": True} for n in range(20)]
+        with mock.patch.object(web, "MAX_DURATION_LOOKUPS", 4):
+            web.fetch_durations(entries, fetch=fetch)
+        self.assertEqual(len(asked), 4)
+
+    def test_a_thumbnail_offered_over_plain_http_is_ignored(self):
+        self.assertEqual(web._thumbnail({"thumbnail": "http://i.example.com/x.jpg"}), "")
+        self.assertEqual(web._thumbnail({"thumbnails": [{"url": "http://i.example.com/x.jpg"}]}), "")
+        self.assertEqual(web._thumbnail({"thumbnail": "https://i.example.com/x.jpg"}),
+                         "https://i.example.com/x.jpg")
+        self.assertEqual(web._thumbnail({"thumbnail": "https://x/" + "a" * 4000}), "")
+
+
 class RemoteCover(TempHome):
+    def cached(self):
+        folder = paths.covers_dir()
+        return sorted(os.listdir(folder)) if os.path.isdir(folder) else []
+
+    PNG = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\x0dIHDR" + struct.pack(">II", 640, 360) + b"rest"
+
     def test_a_thumbnail_is_copied_once_and_reused(self):
         calls = []
 
-        class Fake:
-            def __init__(self, body):
-                self.body = body
-
-            def read(self, size):
-                return self.body[:size]
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *rest):
-                return False
-
-        def opener(url, timeout=0):
+        def get(url, max_bytes, timeout):
             calls.append(url)
-            return Fake(b"imagen")
+            return self.PNG
 
-        url = "https://i.example.com/big.jpg?sqp=abc"
-        path = covers.cache_remote(url, opener=opener)
-        self.assertTrue(path.endswith(".jpg"))
+        url = "https://i.example.com/big.png?sqp=abc"
+        path = covers.cache_remote(url, get=get)
+        self.assertTrue(path.endswith(".png"))
         with open(path, "rb") as f:
-            self.assertEqual(f.read(), b"imagen")
-        self.assertEqual(covers.cache_remote(url, opener=opener), path)
+            self.assertEqual(f.read(), self.PNG)
+        self.assertEqual(covers.cache_remote(url, get=get), path)
         self.assertEqual(len(calls), 1)
 
-    def test_a_thumbnail_that_is_too_big_or_fails_is_skipped(self):
-        class Big:
+    def test_only_https_is_followed(self):
+        def boom(url, max_bytes, timeout):
+            raise AssertionError("this link should never have been opened: " + url)
+
+        for url in ("http://i.example.com/x.png", "ftp://nope/x.jpg", "file:///etc/passwd",
+                    "https://" + "a" * 3000 + "/x.png"):
+            self.assertEqual(covers.cache_remote(url, get=boom), "")
+
+    def test_an_address_on_this_machine_or_this_network_is_refused(self):
+        # Numeric hosts, so the test never asks anyone to resolve a name.
+        self.assertEqual(covers.resolve("127.0.0.1", 443), [])
+        self.assertEqual(covers.resolve("::1", 443), [])
+        self.assertEqual(covers.resolve("10.0.0.5", 443), [])
+        self.assertEqual(covers.resolve("192.168.1.5", 443), [])
+        self.assertEqual(covers.resolve("169.254.169.254", 443), [])
+        self.assertEqual(covers.resolve("localhost", 443), [])
+        self.assertEqual(covers.resolve("8.8.8.8", 443), ["8.8.8.8"])
+
+    def test_every_redirect_is_checked_before_it_is_taken(self):
+        hops = []
+
+        class Response:
+            def __init__(self, status, location=""):
+                self.status, self._location = status, location
+
+            def getheader(self, name):
+                return self._location
+
             def read(self, size):
-                return b"x" * size
+                return RemoteCover.PNG
 
-            def __enter__(self):
-                return self
+        class Fake:
+            def __init__(self, host, address, **rest):
+                self.host = host
 
-            def __exit__(self, *rest):
-                return False
+            def request(self, method, target, headers=None):
+                hops.append(self.host)
 
-        self.assertEqual(covers.cache_remote("https://i.example.com/huge.jpg",
-                                             max_bytes=4, opener=lambda url, timeout=0: Big()), "")
+            def getresponse(self):
+                return Response(*plan.pop(0))
 
-        def boom(url, timeout=0):
+            def close(self):
+                pass
+
+        real_resolve = covers.resolve
+
+        def resolve(host, port):
+            # The one name in the test; every numeric host goes through the real check,
+            # which getaddrinfo answers from the literal without asking anyone.
+            return ["93.184.216.34"] if host == "i.example.com" else real_resolve(host, port)
+
+        with mock.patch.object(covers, "_Pinned", Fake), \
+                mock.patch.object(covers, "resolve", resolve):
+            plan = [(302, "https://127.0.0.1/steal.png")]
+            self.assertEqual(covers.fetch("https://i.example.com/a.png", 1000, 1), b"")
+            self.assertEqual(hops, ["i.example.com"])
+
+            hops.clear()
+            plan = [(302, "http://8.8.8.8/plain.png")]
+            self.assertEqual(covers.fetch("https://i.example.com/a.png", 1000, 1), b"")
+
+            hops.clear()
+            plan = [(302, "https://8.8.8.8/one.png"), (200, "")]
+            self.assertEqual(covers.fetch("https://i.example.com/a.png", 1000, 1), self.PNG)
+
+            hops.clear()
+            plan = [(302, "https://8.8.8.8/%d.png" % n) for n in range(10)]
+            self.assertEqual(covers.fetch("https://i.example.com/a.png", 1000, 1), b"")
+            self.assertEqual(len(hops), covers.MAX_REDIRECTS + 1)
+
+    def test_what_comes_back_has_to_be_an_image_of_a_sane_size(self):
+        huge = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\x0dIHDR" + struct.pack(">II", 50000, 50000) + b"r"
+        for body in (b"", b"<html>not an image</html>" * 4, huge,
+                     b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\x0dIHDR" + struct.pack(">II", 0, 0) + b"r"):
+            self.assertEqual(covers.cache_remote("https://i.example.com/x.png",
+                                                 get=lambda u, m, t, b=body: b), "")
+        self.assertEqual(self.cached(), [])
+
+    def test_a_thumbnail_that_is_too_big_or_fails_is_skipped(self):
+        self.assertEqual(covers.cache_remote("https://i.example.com/huge.png", max_bytes=4,
+                                             get=lambda u, m, t: b""), "")
+
+        def boom(url, max_bytes, timeout):
             raise OSError("no network")
 
-        self.assertEqual(covers.cache_remote("https://i.example.com/x.jpg", opener=boom), "")
-        self.assertEqual(covers.cache_remote("ftp://nope/x.jpg", opener=boom), "")
+        self.assertEqual(covers.cache_remote("https://i.example.com/x.png", get=boom), "")
 
     def test_a_download_that_fails_leaves_no_descriptor_and_no_temp_file(self):
-        def boom(url, timeout=0):
+        def boom(url, max_bytes, timeout):
             raise OSError("no network")
 
         before = len(os.listdir("/proc/self/fd"))
         for _ in range(5):
-            self.assertEqual(covers.cache_remote("https://i.example.com/x.jpg", opener=boom), "")
+            self.assertEqual(covers.cache_remote("https://i.example.com/x.png", get=boom), "")
         self.assertEqual(len(os.listdir("/proc/self/fd")), before)
-        self.assertEqual(sorted(os.listdir(paths.covers_dir())), [])
+        self.assertEqual(self.cached(), [])
 
 
 class ReadmeSafety(unittest.TestCase):

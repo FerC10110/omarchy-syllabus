@@ -45,11 +45,47 @@ def web_options(config, password=""):
             raw.append("write-auto-subs=")
     else:
         options.append(("sid", "no"))
-    if password:
-        raw.append("video-password=" + escape(password))
     if raw:
         options.append(("ytdl-raw-options", ",".join(raw)))
-    return options
+    # The password is kept apart: everything in `options` may end up on a command line,
+    # and a command line is readable by every process on the machine through /proc.
+    return options, (["video-password=" + escape(password)] if password else [])
+
+
+def _long(value):
+    """mpv's length-prefixed form, used unconditionally: a configuration line otherwise
+    ends at a `#` or a space, and a password is allowed to contain both."""
+    return f"%{len(value.encode('utf-8'))}%{value}"
+
+
+def with_secret(options, secret):
+    """The options with the secret raw ones folded in, for the IPC socket: that socket
+    lives in this session's own runtime directory, which no other user can enter."""
+    if not secret:
+        return list(options)
+    out, folded = [], False
+    for key, value in options:
+        if key == "ytdl-raw-options":
+            out.append((key, ",".join([value] + list(secret))))
+            folded = True
+        else:
+            out.append((key, value))
+    if not folded:
+        out.append(("ytdl-raw-options", ",".join(secret)))
+    return out
+
+
+def secret_include(secret):
+    """An unnamed file with the options that must not appear in a command line, or None.
+
+    It exists only as a file descriptor: nothing in the filesystem points at it and it is
+    gone as soon as mpv and this process close it. mpv reads it back through /dev/fd."""
+    if not secret:
+        return None
+    fd = os.memfd_create("syllabus-mpv")
+    os.write(fd, ("ytdl-raw-options-append=" + _long(",".join(secret)) + "\n").encode("utf-8"))
+    os.lseek(fd, 0, os.SEEK_SET)
+    return fd
 
 
 def file_options(start, options):
@@ -58,7 +94,7 @@ def file_options(start, options):
     return ",".join([f"start={float(start):.3f}"] + [f"{key}={escape(value)}" for key, value in options])
 
 
-def build_argv(config, media_path, start, sock, options=()):
+def build_argv(config, media_path, start, sock, options=(), secret_fd=None):
     player = config["player"]
     return ([player["command"],
              "--force-window=immediate",
@@ -72,6 +108,8 @@ def build_argv(config, media_path, start, sock, options=()):
              f"--script-opt=syllabus-bin={paths.BIN_PATH}",
              f"--script-opt=syllabus-report={int(config['reportSeconds'])}"]
             + [f"--{key}={value}" for key, value in options]
+            # After the options above, so its append lands on top of ytdl-raw-options.
+            + ([] if secret_fd is None else [f"--include=/dev/fd/{secret_fd}"])
             + [str(arg) for arg in player.get("args", [])]
             + ["--", media_path])
 
@@ -113,11 +151,12 @@ def is_alive(sock_path):
         raise SyllabusError(f"mpv did not answer: {e}", PLAYER)
 
 
-def play(config, media_path, start, sock=None, spawn=subprocess.Popen, options=()):
+def play(config, media_path, start, sock=None, spawn=subprocess.Popen, options=(), secret=()):
     sock = sock or paths.socket_path()
     if is_alive(sock):
         try:
-            reply = request(sock, ["loadfile", media_path, "replace", -1, file_options(start, options)])
+            reply = request(sock, ["loadfile", media_path, "replace", -1,
+                                   file_options(start, with_secret(options, secret))])
         except OSError as e:
             raise SyllabusError(f"mpv did not answer: {e}", PLAYER)
         if reply.get("error") != "success":
@@ -128,11 +167,16 @@ def play(config, media_path, start, sock=None, spawn=subprocess.Popen, options=(
     except OSError:
         pass
     os.makedirs(os.path.dirname(sock), exist_ok=True)
+    fd = secret_include(secret)
     try:
-        spawn(build_argv(config, media_path, start, sock, options), stdin=subprocess.DEVNULL,
-              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+        spawn(build_argv(config, media_path, start, sock, options, fd), stdin=subprocess.DEVNULL,
+              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+              close_fds=True, pass_fds=() if fd is None else (fd,))
     except OSError as e:
         raise SyllabusError(f"Could not start {config['player']['command']}: {e.strerror or e}", PLAYER)
+    finally:
+        if fd is not None:
+            os.close(fd)
     return "started"
 
 

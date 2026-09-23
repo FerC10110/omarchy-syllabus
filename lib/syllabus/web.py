@@ -5,13 +5,27 @@ import concurrent.futures
 import json
 import os
 import secrets
+import selectors
+import shlex
 import shutil
 import subprocess
+import time
 
 from . import covers, store
 
 # yt-dlp titles a video it cannot read like this; the entry stays, marked gone.
 GONE_TITLES = ("[private video]", "[deleted video]", "[unavailable video]")
+
+# Nothing on the other side of a link is trusted to be small. A course endpoint is
+# chosen by whoever wrote the link, and these ceilings are all that stands between it
+# and this machine's memory: a playlist of ten million entries, a title a megabyte
+# long, or a yt-dlp that is made to print forever, all stop here.
+MAX_STDOUT = 8 * 1024 * 1024
+MAX_STDERR = 64 * 1024
+MAX_ENTRIES = 1000
+MAX_TEXT = 300
+MAX_URL = 2048
+MAX_DURATION_LOOKUPS = 300
 
 
 def ytdlp_bin():
@@ -44,23 +58,127 @@ def _last_line(text):
     return lines[-1].replace("ERROR: ", "") if lines else ""
 
 
-def _run(args, timeout):
-    """yt-dlp's JSON, or (None, "why it failed")."""
+def _close(proc):
+    """Every pipe this process opened for the child. A scan reads many links, and a
+    descriptor left behind on each one adds up to a process that cannot open files."""
+    for stream in (proc.stdin, proc.stdout, proc.stderr):
+        try:
+            if stream is not None:
+                stream.close()
+        except OSError:
+            pass
+
+
+def _kill(proc):
     try:
-        done = subprocess.run([ytdlp_bin()] + args, capture_output=True, text=True, timeout=timeout)
+        proc.kill()
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=5)
+    except Exception:
+        pass
+
+
+def _collect(proc, timeout):
+    """Both of yt-dlp's streams, each under its own ceiling, within one deadline.
+
+    Returns (stdout, stderr, why) where `why` is "", "timeout" or "flood". Reading as
+    it comes is the point: `capture_output` would happily buffer whatever the other
+    side decides to send."""
+    caps = {proc.stdout: MAX_STDOUT, proc.stderr: MAX_STDERR}
+    buffers = {proc.stdout: bytearray(), proc.stderr: bytearray()}
+    deadline = None if timeout is None else time.monotonic() + timeout
+    why = ""
+    with selectors.DefaultSelector() as sel:
+        for stream in caps:
+            sel.register(stream, selectors.EVENT_READ)
+        while sel.get_map() and not why:
+            left = None if deadline is None else deadline - time.monotonic()
+            if left is not None and left <= 0:
+                why = "timeout"
+                break
+            for key, _ in sel.select(timeout=0.5 if left is None else min(left, 0.5)):
+                chunk = key.fileobj.read1(65536)
+                if not chunk:
+                    sel.unregister(key.fileobj)
+                    continue
+                buffers[key.fileobj] += chunk
+                if len(buffers[key.fileobj]) > caps[key.fileobj]:
+                    why = "flood"
+                    break
+    return bytes(buffers[proc.stdout]), bytes(buffers[proc.stderr]), why
+
+
+class Finished:
+    """What `run_capped` gives back: the same three fields a caller reads off
+    subprocess.run, so it can stand in for it."""
+
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
+def run_capped(args, capture_output=True, text=True, input="", timeout=None):
+    """subprocess.run with a ceiling on each stream. A download is a long-lived child
+    talking to a site nobody here chose, and it does not get to decide how much of this
+    machine's memory its output takes."""
+    proc = subprocess.Popen(list(args), stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        try:
+            proc.stdin.write((input or "").encode("utf-8"))
+            proc.stdin.close()
+        except OSError:
+            pass
+        out, err, why = _collect(proc, timeout)
+        if why:
+            _kill(proc)
+            return Finished(1, "", f"yt-dlp {'took too long' if why == 'timeout' else 'sent back far too much'}")
+        return Finished(proc.wait(), out.decode("utf-8", "replace"), err.decode("utf-8", "replace"))
+    finally:
+        _close(proc)
+
+
+def password_config(password):
+    """The one line of yt-dlp configuration that carries a password, for its stdin."""
+    return "--video-password " + shlex.quote(password) + "\n" if password else ""
+
+
+def _run(args, timeout, password=""):
+    """yt-dlp's JSON, or (None, "why it failed")."""
+    argv = [ytdlp_bin()]
+    config = ""
+    if password:
+        # The password goes in on stdin, never on the command line: /proc/<pid>/cmdline
+        # is readable by every process on the machine, and process accounting logs it.
+        argv += ["--config-locations", "-"]
+        config = password_config(password)
+    try:
+        proc = subprocess.Popen(argv + list(args), stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except FileNotFoundError:
         return None, "yt-dlp is not installed"
-    except subprocess.TimeoutExpired:
-        return None, "yt-dlp took too long"
     except OSError as e:
         return None, f"yt-dlp could not run: {e}"
-    if done.returncode != 0:
-        return None, _last_line(done.stderr) or "yt-dlp could not read that link"
     try:
-        data = json.loads(done.stdout)
-    except ValueError:
-        return None, "yt-dlp gave no answer"
-    return (data, "") if isinstance(data, dict) else (None, "yt-dlp gave no answer")
+        try:
+            proc.stdin.write(config.encode("utf-8"))
+            proc.stdin.close()
+        except OSError:
+            pass
+        out, err, why = _collect(proc, timeout)
+        if why:
+            _kill(proc)
+            return None, "yt-dlp took too long" if why == "timeout" else "That link sent back far too much"
+        if proc.wait() != 0:
+            return None, _last_line(err.decode("utf-8", "replace")) or "yt-dlp could not read that link"
+        try:
+            data = json.loads(out.decode("utf-8", "replace"))
+        except ValueError:
+            return None, "yt-dlp gave no answer"
+        return (data, "") if isinstance(data, dict) else (None, "yt-dlp gave no answer")
+    finally:
+        _close(proc)
 
 
 def _number(value):
@@ -69,46 +187,66 @@ def _number(value):
     return round(max(0.0, float(value)), 3)
 
 
+def _clip(value, limit=MAX_TEXT):
+    """A field as it is allowed to be: text, trimmed, and never longer than `limit`.
+
+    Every one of these comes from the other side of a link, so none of them decides
+    how much memory a course takes."""
+    return str(value or "").strip()[:limit]
+
+
 def _entry(raw):
     """One video, or None when there is no id to build an id from."""
     if not isinstance(raw, dict):
         return None
-    video_id = str(raw.get("id") or "").strip()
+    video_id = _clip(raw.get("id"))
     if not video_id:
         return None
-    site = str(raw.get("ie_key") or raw.get("extractor_key") or raw.get("extractor") or "web").strip().lower()
-    title = str(raw.get("title") or "").strip()
-    url = normalize_url(site, video_id, str(raw.get("webpage_url") or raw.get("url") or ""))
+    site = _clip(raw.get("ie_key") or raw.get("extractor_key") or raw.get("extractor") or "web", 40).lower()
+    title = _clip(raw.get("title"))
+    url = _clip(normalize_url(site, video_id, _clip(raw.get("webpage_url") or raw.get("url"), MAX_URL)), MAX_URL)
     return {"site": site or "web", "videoId": video_id, "url": url, "title": title or video_id,
             "duration": _number(raw.get("duration")), "available": title.lower() not in GONE_TITLES}
 
 
+def _usable_thumbnail(url):
+    """A thumbnail link this code is willing to follow: https, and no longer than a url
+    has any business being. Plain http is refused — the address is chosen by the site,
+    and there is no reason to fetch a cover in the clear."""
+    return isinstance(url, str) and url.startswith("https://") and len(url) <= MAX_URL
+
+
 def _thumbnail(raw):
     """The biggest thumbnail yt-dlp offers: the list comes smallest first."""
-    thumb = raw.get("thumbnail")
-    if isinstance(thumb, str) and thumb.startswith("http"):
-        return thumb
-    for item in reversed(raw.get("thumbnails") or []):
-        if isinstance(item, dict) and isinstance(item.get("url"), str) and item["url"].startswith("http"):
+    if _usable_thumbnail(raw.get("thumbnail")):
+        return raw.get("thumbnail")
+    for item in reversed((raw.get("thumbnails") or [])[-20:]):
+        if isinstance(item, dict) and _usable_thumbnail(item.get("url")):
             return item["url"]
     return ""
 
 
-def _answer(kind="", title="", thumbnail="", entries=None, error=""):
-    return {"kind": kind, "title": title, "thumbnail": thumbnail, "entries": entries or [], "error": error}
+def _answer(kind="", title="", thumbnail="", entries=None, error="", dropped=0):
+    return {"kind": kind, "title": title, "thumbnail": thumbnail, "entries": entries or [],
+            "error": error, "dropped": dropped}
+
+
+def _entries_of(data):
+    """The videos of a playlist, up to the ceiling, and how many were left out."""
+    raw = data.get("entries")
+    raw = raw if isinstance(raw, list) else []
+    entries = [e for e in (_entry(item) for item in raw[:MAX_ENTRIES]) if e]
+    return entries, max(0, len(raw) - MAX_ENTRIES)
 
 
 def fetch_playlist(url, password="", timeout=120):
     """What is behind a link: a playlist with its entries, or a single video."""
-    args = ["--flat-playlist", "-J", "--no-warnings"]
-    if password:
-        args += ["--video-password", password]
-    data, error = _run(args + [url], timeout)
+    data, error = _run(["--flat-playlist", "-J", "--no-warnings", url], timeout, password)
     if error:
         return _answer(error=error)
     if data.get("_type") == "playlist":
-        entries = [e for e in (_entry(raw) for raw in data.get("entries") or []) if e]
-        return _answer("playlist", str(data.get("title") or "").strip(), _thumbnail(data), entries)
+        entries, dropped = _entries_of(data)
+        return _answer("playlist", _clip(data.get("title")), _thumbnail(data), entries, dropped=dropped)
     entry = _entry(data)
     if entry is None:
         return _answer(error="That link has no video")
@@ -116,10 +254,7 @@ def fetch_playlist(url, password="", timeout=120):
 
 
 def fetch_video(url, password="", timeout=60):
-    args = ["-J", "--no-playlist", "--no-warnings"]
-    if password:
-        args += ["--video-password", password]
-    data, error = _run(args + [url], timeout)
+    data, error = _run(["-J", "--no-playlist", "--no-warnings", url], timeout, password)
     if error:
         return _answer(error=error)
     entry = _entry(data)
@@ -129,8 +264,11 @@ def fetch_video(url, password="", timeout=60):
 
 
 def fetch_durations(entries, password="", workers=4, fetch=fetch_video):
-    """A flat playlist has no durations: ask for the missing ones, a few at a time."""
-    todo = [e for e in entries if e["available"] and not e["duration"] and e["url"]]
+    """A flat playlist has no durations: ask for the missing ones, a few at a time.
+
+    One scan is worth a bounded amount of work: past `MAX_DURATION_LOOKUPS` the rest
+    keep the duration they have, which the next scan fills in."""
+    todo = [e for e in entries if e["available"] and not e["duration"] and e["url"]][:MAX_DURATION_LOOKUPS]
     if not todo:
         return
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
@@ -187,6 +325,8 @@ def _read_course(course_id, definition, old, info, fetch_list, fetch_one, cover,
             return (old, dict(info, error=answer["error"])) if old else (None, dict(info, error=answer["error"]))
         title = answer["title"] or title
         thumbnail = answer["thumbnail"] or thumbnail
+        if answer.get("dropped"):
+            error = f"This playlist has more than {MAX_ENTRIES} videos; the rest are not shown"
         fetch_durations(answer["entries"], str(playlist.get("password") or ""), fetch=fetch_one)
         blocks.append(("playlist", answer["entries"]))
     old_by_id = {l["id"]: l for l in (old or {}).get("lessons", [])}
