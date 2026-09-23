@@ -20,8 +20,8 @@ omarchy plugin add https://github.com/FerC10110/omarchy-syllabus.git --enable
 The bar gains a 󰑴 button, on the left unless you choose another place. Click it
 to open the panel; right-click it to continue the last video.
 
-Syllabus uses `mpv`, `ffprobe` (from ffmpeg), `wl-clipboard`, `xdg-utils` and
-Python 3, all part of Omarchy. The [Readily](https://github.com/FerC10110/omarchy-readily)
+Syllabus uses `mpv`, `ffprobe` (from ffmpeg), `yt-dlp` (only for the courses
+from the web), `wl-clipboard`, `xdg-utils` and Python 3, all part of Omarchy. The [Readily](https://github.com/FerC10110/omarchy-readily)
 plugin is optional.
 
 ## Your courses

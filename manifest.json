@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "author": "Fernando Cancro",
   "license": "MIT",
-  "description": "Study roadmaps for the video courses on your disk: resume every video where you left it, with tasks, links, notes and bookmarks.",
+  "description": "Study roadmaps for your video courses, on your disk or on YouTube and Vimeo: resume every video where you left it, with tasks, links, notes and bookmarks.",
   "kinds": ["bar-widget"],
   "entryPoints": {
     "barWidget": "BarWidget.qml"
